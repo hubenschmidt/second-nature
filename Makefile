@@ -1,5 +1,4 @@
-PKG_CONFIG_PATH := ./pkgconfig:$(PKG_CONFIG_PATH)
-export PKG_CONFIG_PATH
+export PKG_CONFIG_PATH := $(CURDIR)/pkgconfig:$(PKG_CONFIG_PATH)
 
 build:
 	go build -o sn-monitor .
