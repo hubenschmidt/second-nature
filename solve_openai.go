@@ -88,6 +88,40 @@ func (p *OpenAIProvider) Solve(pngData []byte, onDelta func(string)) (string, er
 	return text, nil
 }
 
+func (p *OpenAIProvider) Summarize(text string) (string, error) {
+	params := responses.ResponseNewParams{
+		Model:           p.model,
+		MaxOutputTokens: openai.Int(2048),
+		Input: responses.ResponseNewParamsInputUnion{
+			OfInputItemList: responses.ResponseInputParam{
+				{OfMessage: &responses.EasyInputMessageParam{
+					Role: "user",
+					Content: responses.EasyInputMessageContentUnionParam{
+						OfInputItemContentList: responses.ResponseInputMessageContentListParam{
+							responses.ResponseInputContentParamOfInputText(text),
+						},
+					},
+				}},
+			},
+		},
+	}
+
+	stream := p.client.Responses.NewStreaming(context.Background(), params)
+
+	var buf strings.Builder
+	for stream.Next() {
+		evt := stream.Current()
+		if evt.Type == "response.output_text.delta" {
+			buf.WriteString(evt.Delta.OfString)
+		}
+	}
+
+	if err := stream.Err(); err != nil {
+		return "", fmt.Errorf("summarize failed: %w", err)
+	}
+	return buf.String(), nil
+}
+
 func (p *OpenAIProvider) FollowUp(text string, onDelta func(string)) (string, error) {
 	params := responses.ResponseNewParams{
 		Model:           p.model,

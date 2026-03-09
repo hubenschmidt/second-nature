@@ -76,6 +76,33 @@ func (p *AnthropicProvider) Solve(pngData []byte, onDelta func(string)) (string,
 	return text, nil
 }
 
+func (p *AnthropicProvider) Summarize(text string) (string, error) {
+	stream := p.client.Messages.NewStreaming(context.Background(), anthropic.MessageNewParams{
+		Model:     p.model,
+		MaxTokens: 2048,
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock(text)),
+		},
+	})
+
+	var buf strings.Builder
+	for stream.Next() {
+		evt := stream.Current()
+		if evt.Type != "content_block_delta" {
+			continue
+		}
+		if evt.Delta.Type != "text_delta" {
+			continue
+		}
+		buf.WriteString(evt.Delta.Text)
+	}
+
+	if err := stream.Err(); err != nil {
+		return "", fmt.Errorf("summarize failed: %w", err)
+	}
+	return buf.String(), nil
+}
+
 func (p *AnthropicProvider) FollowUp(text string, onDelta func(string)) (string, error) {
 	p.history = append(p.history, anthropic.NewUserMessage(
 		anthropic.NewTextBlock(text),

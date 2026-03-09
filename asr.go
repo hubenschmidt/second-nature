@@ -22,7 +22,7 @@ const (
 type CaptureMode int
 
 const (
-	CaptureModeMic    CaptureMode = iota
+	CaptureModeMic CaptureMode = iota
 	CaptureModeSystem
 	CaptureModeBoth
 )
@@ -147,6 +147,24 @@ func (r *Recorder) Stop() []int16 {
 	out := make([]int16, len(r.samples))
 	copy(out, r.samples)
 	return out
+}
+
+// PeekTailRMS returns the RMS of the last n samples without draining.
+func (r *Recorder) PeekTailRMS(n int) float64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if len(r.samples) < n {
+		return rms(r.samples)
+	}
+	return rms(r.samples[len(r.samples)-n:])
+}
+
+// SampleCount returns the current number of buffered samples.
+func (r *Recorder) SampleCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.samples)
 }
 
 func (r *Recorder) DrainSamples() []int16 {

@@ -84,7 +84,10 @@ func main() {
 	}()
 
 	recorder := NewRecorder(CaptureModeMic, "")
-	ac := NewAudioCapture(captureMode, monSource, whisperURL, renderer)
+	summarizeFn := func(text string) (string, error) {
+		return provider.Summarize(summarizePrompt + text)
+	}
+	ac := NewAudioCapture(captureMode, monSource, whisperURL, renderer, summarizeFn)
 	micRecording := false
 	dispatch := func() {
 		for action := range ch {
@@ -171,6 +174,14 @@ type helpLine struct {
 	text   string
 }
 
+const summarizePrompt = `Summarize this meeting transcript segment into concise bullet points.
+Preserve: key decisions, action items, names, technical terms, questions raised.
+Omit: filler words, repetition, small talk.
+Keep the summary under 500 words.
+
+Transcript segment:
+`
+
 var helpLines = []helpLine{
 	{HotkeyCapture, "screen capture → solve"},
 	{HotkeyAudioCapture, "toggle audio capture (system audio)"},
@@ -181,7 +192,7 @@ var helpLines = []helpLine{
 
 var languages = map[string]string{
 	"1": "Python",
-	"2": "JavaScript",
+	"2": "JavaScript (ECMAScript 6)",
 	"3": "TypeScript",
 	"4": "Go",
 	"5": "Java",
@@ -192,7 +203,7 @@ var languages = map[string]string{
 func selectLanguage(scanner *bufio.Scanner) string {
 	fmt.Println("\nCode language:")
 	fmt.Println("  1: Python")
-	fmt.Println("  2: JavaScript")
+	fmt.Println("  2: JavaScript (ECMAScript 6)")
 	fmt.Println("  3: TypeScript")
 	fmt.Println("  4: Go")
 	fmt.Println("  5: Java")
@@ -282,9 +293,7 @@ Transcript:
 }
 
 func handleAudioSend(ac *AudioCapture, provider Provider, renderer Renderer, lang string) {
-	// Flush any remaining audio before draining transcript
-	ac.TranscribeNow()
-	transcript := ac.DrainTranscript()
+	transcript := ac.BuildContext()
 	if transcript == "" {
 		renderer.SetStatus("no transcript accumulated")
 		return
