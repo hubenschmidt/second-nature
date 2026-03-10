@@ -360,6 +360,9 @@ func main() {
 	// Overlay mode: webview.Run() must be on the main thread
 	go dispatch()
 	overlay.Run()
+
+	// Tear down MPX after overlay exits so Chromium-based apps regain keyboard input
+	teardownMPX()
 }
 
 func applyConfig(cfg AppConfig, monitors []MonitorInfo) (int, Provider, Renderer, string, CaptureMode, string, string, error) {
@@ -913,6 +916,19 @@ func whisperHealthy(whisperURL string) bool {
 	}
 	resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
+}
+
+func teardownMPX() {
+	script := filepath.Join(filepath.Dir(os.Args[0]), "teardown-mpx.sh")
+	if _, err := os.Stat(script); err != nil {
+		return
+	}
+	out, err := exec.Command("bash", script).CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mpx teardown error: %v\n%s", err, out)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "%s", out)
 }
 
 func runVULoop(renderer Renderer, recorder *Recorder, ac *AudioCapture, soundCheck *atomic.Bool) {

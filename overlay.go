@@ -68,6 +68,25 @@ static void set_transparent(void *gtkWindow) {
 	g_signal_connect(win, "draw", G_CALLBACK(on_draw), NULL);
 	find_and_clear_webkit(win);
 }
+
+// fix_signal_handlers patches all signal handlers installed by
+// GTK/WebKit to include SA_ONSTACK so the Go runtime can safely
+// forward signals to them.
+#include <signal.h>
+static void fix_signal_handlers(void) {
+	int sigs[] = {SIGSEGV, SIGBUS, SIGFPE, SIGPIPE, SIGABRT};
+	for (int i = 0; i < (int)(sizeof(sigs)/sizeof(sigs[0])); i++) {
+		struct sigaction sa;
+		if (sigaction(sigs[i], NULL, &sa) != 0)
+			continue;
+		if (sa.sa_handler == SIG_DFL || sa.sa_handler == SIG_IGN)
+			continue;
+		if (sa.sa_flags & SA_ONSTACK)
+			continue;
+		sa.sa_flags |= SA_ONSTACK;
+		sigaction(sigs[i], &sa, NULL);
+	}
+}
 */
 import "C"
 
@@ -119,6 +138,10 @@ func NewOverlayRenderer() *OverlayRenderer {
 	// Now the webkit child exists — make its background transparent
 	C.set_transparent(gtkWin)
 
+	// Patch signal handlers installed by GTK/WebKit to include SA_ONSTACK
+	// so the Go runtime can safely forward signals to them.
+	C.fix_signal_handlers()
+
 	o := &OverlayRenderer{
 		w:        w,
 		md:       newMarkdownRenderer(),
@@ -154,6 +177,7 @@ func NewOverlayRenderer() *OverlayRenderer {
 	// Because Bind callbacks run on the GTK main thread, this avoids
 	// all cross-thread Dispatch calls that were causing SIGSEGV.
 	w.Bind("_pollUpdates", func() string {
+		C.fix_signal_handlers()
 		o.pendingMu.Lock()
 		js := o.pendingJS.String()
 		o.pendingJS.Reset()
@@ -518,15 +542,17 @@ body {
   overflow-y: auto;
 }
 #drag-handle {
-  cursor: grab; height: 28px; background: rgba(255,255,255,0.15);
+  cursor: grab; height: 28px; background: rgba(40,40,40,0.97);
   text-align: center; font-size: 12px; color: #aaa;
   line-height: 28px; user-select: none;
   border-bottom: 1px solid rgba(255,255,255,0.2);
+  position: sticky; top: 0; z-index: 10;
 }
 #drag-handle:active { cursor: grabbing; }
-#status { color: #888; font-size: 12px; padding: 8px 12px 0; }
+#status { color: #888; font-size: 12px; padding: 8px 12px 0; background: rgba(40,40,40,0.97); position: sticky; top: 28px; z-index: 10; }
 #tab-bar {
   display: flex; gap: 0; border-bottom: 1px solid rgba(255,255,255,0.2);
+  background: rgba(40,40,40,0.97); position: sticky; top: 48px; z-index: 10;
 }
 #tab-bar button {
   flex: 1; background: rgba(255,255,255,0.05); border: none;
@@ -762,15 +788,16 @@ window._injectSandboxButtons=function(){
     var wrap=wraps[i];
     var lang=wrap.getAttribute('data-lang');
     if(!window._sandboxLangs[lang])continue;
+    if(wrap.querySelector('.sandbox-btn'))continue;
     var pre=wrap.querySelector('pre');
-    if(!pre||pre.querySelector('.sandbox-btn'))continue;
+    if(!pre)continue;
     var code=pre.querySelector('code')||pre;
-    pre.style.position='relative';
+    wrap.style.position='relative';
     var btn=document.createElement('button');
     btn.className='sandbox-btn';
     btn.textContent='\u25B6 Sandbox';
     btn.onclick=(function(c,l){return function(){_sendToSandbox(c.textContent,l);};})(code,lang);
-    pre.appendChild(btn);
+    wrap.appendChild(btn);
   }
 };
 (function vuPump(){

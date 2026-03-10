@@ -193,6 +193,9 @@ func (ac *AudioCapture) TranscriptLen() int {
 
 // TranscribeNow drains audio samples, transcribes, and appends to raw chunks.
 func (ac *AudioCapture) TranscribeNow() {
+	if ac.recorder == nil {
+		return
+	}
 	samples := ac.recorder.DrainSamples()
 	if len(samples) == 0 {
 		return
