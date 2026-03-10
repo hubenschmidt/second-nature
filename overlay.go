@@ -77,10 +77,12 @@ import (
 	"unsafe"
 
 	chromahtml "github.com/alecthomas/chroma/v2/formatters/html"
+	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/styles"
 	webview "github.com/webview/webview_go"
 	"github.com/yuin/goldmark"
 	highlighting "github.com/yuin/goldmark-highlighting/v2"
+	"github.com/yuin/goldmark/util"
 )
 
 type OverlayRenderer struct {
@@ -92,6 +94,12 @@ type OverlayRenderer struct {
 	pendingJS strings.Builder
 	closed    atomic.Bool
 	onAction  func(HotkeyAction)
+	provider  Provider
+	vuJS      atomic.Pointer[string]
+
+	sandboxMu   sync.Mutex
+	sandboxCode string
+	sandboxLang string
 }
 
 func NewOverlayRenderer() *OverlayRenderer {
@@ -128,7 +136,7 @@ func NewOverlayRenderer() *OverlayRenderer {
 	})
 
 	// Bind a JS-callable function that drains pending JS updates.
-	// The JS side polls this every 80ms via setInterval.
+	// The JS side polls this every 33ms via setInterval.
 	// Because Bind callbacks run on the GTK main thread, this avoids
 	// all cross-thread Dispatch calls that were causing SIGSEGV.
 	w.Bind("_pollUpdates", func() string {
@@ -139,6 +147,126 @@ func NewOverlayRenderer() *OverlayRenderer {
 		return js
 	})
 
+	w.Bind("_pollVU", func() string {
+		p := o.vuJS.Swap(nil)
+		if p == nil {
+			return ""
+		}
+		return *p
+	})
+
+	w.Bind("_pollLog", func(after int) string {
+		entries := AppLog.Since(after)
+		if len(entries) == 0 {
+			return ""
+		}
+		b, _ := json.Marshal(entries)
+		return string(b)
+	})
+
+	w.Bind("_sendToSandbox", func(code, lang string) {
+		AppLog.Info("overlay: sendToSandbox lang=%s code=%d bytes", lang, len(code))
+		o.sandboxMu.Lock()
+		o.sandboxCode = code
+		o.sandboxLang = lang
+		o.sandboxMu.Unlock()
+
+		js := "document.getElementById('sandbox-editor').value=" + jsString(code) + ";" +
+			"document.getElementById('sandbox-lang').textContent=" + jsString(lang) + ";" +
+			"document.getElementById('sandbox-tests').value='';" +
+			"document.getElementById('sandbox-tests-hl').innerHTML='';" +
+			"document.getElementById('sandbox-tests-wrap').style.display='none';" +
+			"document.getElementById('sandbox-tests-label').style.display='none';" +
+			"switchTab('sandbox');" +
+			"_autoSize(document.getElementById('sandbox-editor'));" +
+			"_syncHighlight('sandbox-editor','sandbox-editor-hl');" +
+			"document.getElementById('sandbox-output').innerHTML='<span style=\"color:#888\">running...</span>';"
+		o.eval(js)
+
+		go func() {
+			res := RunSandbox(code, lang)
+			o.renderSandboxResult(res)
+		}()
+	})
+
+	w.Bind("_runSandbox", func(code, tests, lang string) {
+		combined := code
+		if tests != "" {
+			combined = code + "\n" + tests
+		}
+		AppLog.Info("overlay: runSandbox lang=%s code=%d bytes", lang, len(combined))
+		if combined == "" {
+			AppLog.Warn("overlay: runSandbox called with empty code")
+			return
+		}
+		o.sandboxMu.Lock()
+		o.sandboxCode = combined
+		o.sandboxLang = lang
+		o.sandboxMu.Unlock()
+		o.eval("document.getElementById('sandbox-output').innerHTML='<span style=\"color:#888\">running...</span>';")
+
+		go func() {
+			res := RunSandbox(combined, lang)
+			o.renderSandboxResult(res)
+		}()
+	})
+
+	w.Bind("_genTests", func(code, lang string) {
+		if o.provider == nil {
+			o.eval("document.getElementById('sandbox-output').innerHTML='<span class=\"sandbox-fail\">error: no provider configured</span>';")
+			return
+		}
+		if code == "" {
+			return
+		}
+		o.eval("document.getElementById('sandbox-output').innerHTML='<span style=\"color:#888\">generating tests...</span>';")
+
+		go func() {
+			prompt := "Generate test assertions for the following " + lang + " code. " +
+				"Do NOT redeclare or redefine any functions/classes — just call them. " +
+				"Use assertions with expected values (e.g. console.assert, assert, if/throw) that print a failure message when wrong and print nothing when correct. " +
+				"At the end, print a summary line like 'N/N tests passed'. " +
+				"Only output raw executable code — no markdown fences, no explanation.\n\n" + code
+			result, err := o.provider.Summarize(prompt)
+			if err != nil {
+				o.eval("document.getElementById('sandbox-output').innerHTML=" + jsString(`<span class="sandbox-fail">error: `+err.Error()+`</span>`) + ";")
+				return
+			}
+
+			showTests := "document.getElementById('sandbox-tests-label').style.display='block';" +
+				"document.getElementById('sandbox-tests-wrap').style.display='block';" +
+				"document.getElementById('sandbox-tests').value=" + jsString(result) + ";" +
+				"_autoSize(document.getElementById('sandbox-tests'));" +
+				"_syncHighlight('sandbox-tests','sandbox-tests-hl');"
+			o.eval(showTests)
+			o.eval("document.getElementById('sandbox-output').innerHTML='<span style=\"color:#888\">running...</span>';")
+
+			combined := code + "\n" + result
+			o.sandboxMu.Lock()
+			o.sandboxCode = combined
+			o.sandboxLang = lang
+			o.sandboxMu.Unlock()
+
+			res := RunSandbox(combined, lang)
+			o.renderSandboxResult(res)
+		}()
+	})
+
+	w.Bind("_highlight", func(code, lang string) string {
+		lexer := lexers.Get(lang)
+		if lexer == nil {
+			lexer = lexers.Fallback
+		}
+		tokens, err := lexer.Tokenise(nil, code)
+		if err != nil {
+			return escapeHTML(code)
+		}
+		formatter := chromahtml.New(chromahtml.WithClasses(true))
+		var buf bytes.Buffer
+		_ = formatter.Format(&buf, styles.Get("monokai"), tokens)
+		return buf.String()
+	})
+
 	w.SetHtml(o.buildShell("Ready."))
 	C.show_window(gtkWin)
 	return o
@@ -147,6 +275,8 @@ func NewOverlayRenderer() *OverlayRenderer {
 func (o *OverlayRenderer) SetActionHandler(fn func(HotkeyAction)) {
 	o.onAction = fn
 }
+
+func (o *OverlayRenderer) SetProvider(p Provider) { o.provider = p }
 
 // eval queues a JS snippet to be executed on the next poll cycle.
 func (o *OverlayRenderer) eval(js string) {
@@ -181,7 +311,7 @@ func (o *OverlayRenderer) Render(markdown string) error {
 	}
 
 	js := "document.getElementById('chat-content').innerHTML=" + jsString(html) + ";" +
-		"document.getElementById('footer-status').textContent='';"
+		"document.getElementById('footer-status').textContent='';_injectSandboxButtons();"
 	o.eval(js)
 	return nil
 }
@@ -193,14 +323,15 @@ func (o *OverlayRenderer) SetStatus(status string) {
 
 func (o *OverlayRenderer) StreamStart() {
 	o.streamBuf.Reset()
-	js := "document.getElementById('chat-content').innerHTML='<pre id=\"stream\"></pre>';" +
+	js := "window._autoScroll=true;" +
+		"document.getElementById('chat-content').innerHTML='<pre id=\"stream\"></pre>';" +
 		"document.getElementById('footer-status').textContent='';"
 	o.eval(js)
 }
 
 func (o *OverlayRenderer) StreamDelta(delta string) {
 	o.streamBuf.WriteString(delta)
-	js := "var s=document.getElementById('stream');if(s)s.textContent+=" + jsString(delta) + ";"
+	js := "var s=document.getElementById('stream');if(s){s.textContent+=" + jsString(delta) + ";if(window._autoScroll)s.scrollIntoView(false);}"
 	o.eval(js)
 }
 
@@ -211,13 +342,15 @@ func (o *OverlayRenderer) StreamDone() {
 	}
 	wrapped := `<div class="response-block">` + html +
 		`<button class="explain-btn" onclick="_action('explain')" title="Explain further">?</button></div>`
-	js := "document.getElementById('chat-content').innerHTML=" + jsString(wrapped) + ";"
+	js := "var c=document.getElementById('chat-content'),st=c.scrollTop;" +
+		"c.innerHTML=" + jsString(wrapped) + ";_injectSandboxButtons();" +
+		"if(!window._autoScroll)c.scrollTop=st;"
 	o.eval(js)
 }
 
 func (o *OverlayRenderer) AppendStreamStart() {
 	o.streamBuf.Reset()
-	js := `var c=document.getElementById('chat-content');` +
+	js := `window._autoScroll=true;var c=document.getElementById('chat-content');` +
 		`c.innerHTML+='<hr><h3 style="color:#7ec8e3">▼ follow-up</h3><pre id="stream"></pre>';` +
 		`document.getElementById('footer-status').textContent='';` +
 		`c.scrollTop=c.scrollHeight;`
@@ -226,7 +359,7 @@ func (o *OverlayRenderer) AppendStreamStart() {
 
 func (o *OverlayRenderer) AppendStreamDelta(delta string) {
 	o.streamBuf.WriteString(delta)
-	js := "var s=document.getElementById('stream');if(s){s.textContent+=" + jsString(delta) + ";s.scrollIntoView(false);}"
+	js := "var s=document.getElementById('stream');if(s){s.textContent+=" + jsString(delta) + ";if(window._autoScroll)s.scrollIntoView(false);}"
 	o.eval(js)
 }
 
@@ -238,7 +371,9 @@ func (o *OverlayRenderer) AppendStreamDone() {
 	wrapped := `<div class="response-block">` + html +
 		`<button class="explain-btn" onclick="_action('explain')" title="Explain further">?</button></div>`
 	js := `var s=document.getElementById('stream');` +
-		`if(s){var d=document.createElement('div');d.innerHTML=` + jsString(wrapped) + `;s.replaceWith(d);d.scrollIntoView(false);}`
+		`if(s){var c=document.getElementById('chat-content'),st=c.scrollTop;` +
+		`var d=document.createElement('div');d.innerHTML=` + jsString(wrapped) + `;s.replaceWith(d);` +
+		`if(window._autoScroll)d.scrollIntoView(false);else c.scrollTop=st;}_injectSandboxButtons();`
 	o.eval(js)
 }
 
@@ -248,10 +383,7 @@ func (o *OverlayRenderer) AppendTranscriptChunk(source, text string) {
 		escapeHTML(ts), escapeHTML(source), escapeHTML(text))
 	js := `var t=document.getElementById('transcript-content');` +
 		`t.innerHTML+=` + jsString(chunk) + `;` +
-		`if(t.classList.contains('active')){t.scrollTop=t.scrollHeight;}` +
-		`else{window._transcriptBadge++;var btn=document.getElementById('tab-transcript');` +
-		`var b=btn.querySelector('.tab-badge');if(!b){b=document.createElement('span');b.className='tab-badge';btn.appendChild(b);}` +
-		`b.textContent=window._transcriptBadge;}`
+		`if(t.classList.contains('active')){t.scrollTop=t.scrollHeight;}`
 	o.eval(js)
 }
 
@@ -267,6 +399,21 @@ func (o *OverlayRenderer) SetAudioRecording(recording bool) {
 	o.eval(js)
 }
 
+func (o *OverlayRenderer) SetSoundCheck(active bool) {
+	scLabel := keyLabels[HotkeySoundCheck]
+	label := escapeHTML(scLabel)
+	bg, color := "''", "''"
+	vuDisplay := "'none'"
+	if active {
+		label = `<span class="rec-dot"></span>` + escapeHTML(scLabel)
+		bg, color = "'rgba(220,50,50,0.7)'", "'#fff'"
+		vuDisplay = "'flex'"
+	}
+	js := fmt.Sprintf(`var b=document.getElementById('btn-soundcheck');if(b){b.style.background=%s;b.style.color=%s;b.innerHTML=%s;}`+
+		`document.getElementById('vu-meters').style.display=%s;`, bg, color, jsString(label), vuDisplay)
+	o.eval(js)
+}
+
 func (o *OverlayRenderer) SetMicRecording(recording bool) {
 	micLabel := keyLabels[HotkeyFollowUp]
 	label := escapeHTML(micLabel)
@@ -279,6 +426,17 @@ func (o *OverlayRenderer) SetMicRecording(recording bool) {
 	o.eval(js)
 }
 
+func (o *OverlayRenderer) UpdateVU(micLevel, audioLevel float64) {
+	js := fmt.Sprintf(
+		"var m=document.getElementById('vu-mic'),a=document.getElementById('vu-audio');"+
+			"if(m){m.style.width='%.0f%%';m.style.background=%s;}"+
+			"if(a){a.style.width='%.0f%%';a.style.background=%s;}",
+		micLevel*100, vuColor(micLevel),
+		audioLevel*100, vuColor(audioLevel),
+	)
+	o.vuJS.Store(&js)
+}
+
 func (o *OverlayRenderer) Clear() {
 	js := "document.getElementById('chat-content').innerHTML='';" +
 		"document.getElementById('transcript-content').innerHTML='';" +
@@ -289,6 +447,29 @@ func (o *OverlayRenderer) Clear() {
 func (o *OverlayRenderer) Close() {
 	o.closed.Store(true)
 	o.w.Terminate()
+}
+
+func (o *OverlayRenderer) renderSandboxResult(r SandboxResult) {
+	AppLog.Info("overlay: rendering sandbox result exit=%d", r.ExitCode)
+	var parts []string
+	if r.Stdout != "" {
+		parts = append(parts, escapeHTML(r.Stdout))
+	}
+	if r.Stderr != "" {
+		parts = append(parts, `<span class="sandbox-fail">`+escapeHTML(r.Stderr)+`</span>`)
+	}
+	if r.Error != "" {
+		parts = append(parts, `<span class="sandbox-fail">error: `+escapeHTML(r.Error)+`</span>`)
+	}
+
+	cls := "sandbox-ok"
+	if r.ExitCode != 0 {
+		cls = "sandbox-fail"
+	}
+	footer := fmt.Sprintf(`<span class="%s">exit %d</span>`, cls, r.ExitCode)
+	html := strings.Join(parts, "\n") + "\n" + footer
+
+	o.eval("document.getElementById('sandbox-output').innerHTML=" + jsString(html) + ";")
 }
 
 func (o *OverlayRenderer) markdownToHTML(md string) (string, error) {
@@ -404,6 +585,33 @@ body {
 }
 #footer-btns button:hover { background:rgba(255,255,255,0.18); color:#fff; }
 #footer-btns button:active { background:rgba(255,255,255,0.25); }
+#vu-meters { display:none; gap:8px; padding:2px 12px; align-items:center; }
+.vu-label { font-size:9px; color:#888; width:32px; }
+.vu-track { flex:1; height:4px; background:rgba(255,255,255,0.1); border-radius:2px; overflow:hidden; }
+.vu-fill { height:100%; width:0%; border-radius:2px; }
+.editor-wrap { position:relative; }
+.editor-highlight { position:absolute; top:0; left:0; right:0; bottom:0; margin:0; pointer-events:none; overflow:hidden; font-family:inherit; font-size:12px; line-height:1.5; padding:10px; border:1px solid transparent; border-radius:4px; white-space:pre; tab-size:2; background:transparent; }
+.editor-highlight code { font-family:inherit; }
+#sandbox-editor, #sandbox-tests { position:relative; z-index:1; background:rgba(0,0,0,0.35); color:transparent; caret-color:#e0e0e0; font-family:inherit; font-size:12px; line-height:1.5; border:1px solid rgba(255,255,255,0.15); border-radius:4px; padding:10px; resize:none; overflow-y:auto; white-space:pre; overflow-wrap:normal; overflow-x:auto; tab-size:2; width:100%; }
+#sandbox-editor { min-height:60px; max-height:50vh; }
+#sandbox-editor:focus { outline:none; border-color:rgba(126,200,227,0.4); }
+#sandbox-editor::selection { background:rgba(126,200,227,0.3); }
+#sandbox-tests-label { color:#7ec8e3; font-size:11px; margin-top:8px; display:none; }
+#sandbox-tests { min-height:40px; max-height:30vh; background:rgba(0,0,0,0.25); border-color:rgba(80,140,220,0.3); }
+#sandbox-tests:focus { outline:none; border-color:rgba(80,140,220,0.5); }
+#sandbox-tests::selection { background:rgba(80,140,220,0.3); }
+#sandbox-controls { display:flex; gap:8px; align-items:center; padding:4px 0; }
+#sandbox-run { background:rgba(80,180,80,0.3); border:1px solid rgba(80,180,80,0.5); color:#7ec8e3; font:inherit; font-size:12px; padding:4px 12px; border-radius:3px; cursor:pointer; }
+#sandbox-run:hover { background:rgba(80,180,80,0.5); }
+#sandbox-test { background:rgba(80,140,220,0.3); border:1px solid rgba(80,140,220,0.5); color:#7ec8e3; font:inherit; font-size:12px; padding:4px 12px; border-radius:3px; cursor:pointer; }
+#sandbox-test:hover { background:rgba(80,140,220,0.5); }
+#sandbox-lang { color:#888; font-size:11px; }
+#sandbox-output { background:rgba(0,0,0,0.5); padding:10px; border-radius:4px; font-size:12px; white-space:pre-wrap; max-height:400px; overflow-y:auto; margin-top:8px; }
+.sandbox-btn { position:absolute; bottom:4px; right:4px; background:rgba(80,180,80,0.2); border:1px solid rgba(80,180,80,0.4); color:#7ec8e3; font-size:11px; padding:1px 8px; border-radius:3px; cursor:pointer; }
+.sandbox-btn:hover { background:rgba(80,180,80,0.4); color:#fff; }
+.sandbox-ok { color:#50b050; } .sandbox-fail { color:#e05050; }
+#log-output { font-size:11px; white-space:pre-wrap; color:#ccc; max-height:100%; overflow-y:auto; }
+.log-error { color:#e05050; } .log-warn { color:#e8a735; } .log-info { color:#888; }
 ` + o.chromaCS + `
 </style></head><body>
 <div id="drag-handle">&#x2630; sn-monitor</div>
@@ -411,10 +619,37 @@ body {
 <div id="tab-bar">
   <button id="tab-chat" class="active" onclick="switchTab('chat')">Chat</button>
   <button id="tab-transcript" onclick="switchTab('transcript')">Transcript</button>
+  <button id="tab-sandbox" onclick="switchTab('sandbox')">Sandbox</button>
+  <button id="tab-log" onclick="switchTab('log')">Log</button>
 </div>
 <div id="chat-content" class="tab-content active"></div>
 <div id="transcript-content" class="tab-content"></div>
-<div id="footer"><div id="footer-status"></div><div id="footer-btns">
+<div id="sandbox-content" class="tab-content">
+  <div class="editor-wrap">
+    <pre class="editor-highlight"><code id="sandbox-editor-hl"></code></pre>
+    <textarea id="sandbox-editor" spellcheck="false" placeholder="Paste or send code here..."></textarea>
+  </div>
+  <div id="sandbox-tests-label">Generated tests:</div>
+  <div class="editor-wrap" style="display:none" id="sandbox-tests-wrap">
+    <pre class="editor-highlight"><code id="sandbox-tests-hl"></code></pre>
+    <textarea id="sandbox-tests" spellcheck="false" placeholder="Generated tests appear here..."></textarea>
+  </div>
+  <div id="sandbox-controls">
+    <button id="sandbox-run" onclick="_runCombined()">&#9654; Run</button>
+    <button id="sandbox-test" onclick="_genTests(document.getElementById('sandbox-editor').value,document.getElementById('sandbox-lang').textContent)">&#9654; Test</button>
+    <span id="sandbox-lang"></span>
+  </div>
+  <pre id="sandbox-output"></pre>
+</div>
+<div id="log-content" class="tab-content"><pre id="log-output"></pre></div>
+<div id="footer"><div id="footer-status"></div>
+<div id="vu-meters">
+  <span class="vu-label">mic</span>
+  <div class="vu-track"><div id="vu-mic" class="vu-fill"></div></div>
+  <span class="vu-label">audio</span>
+  <div class="vu-track"><div id="vu-audio" class="vu-fill"></div></div>
+</div>
+<div id="footer-btns">
 ` + buildFooterButtons() + `
 </div></div>
 <script>
@@ -428,26 +663,102 @@ body {
   };
   document.onmouseup=function(){d=false};
 })();
-window._transcriptBadge=0;
+window._autoSize=function(el){el.style.height='auto';el.style.height=el.scrollHeight+'px';};
+window._hlTimers={};
+window._syncHighlight=function(taId,hlId){
+  var ta=document.getElementById(taId);
+  var hl=document.getElementById(hlId);
+  if(!ta||!hl)return;
+  var lang=document.getElementById('sandbox-lang').textContent||'';
+  _highlight(ta.value,lang).then(function(html){hl.innerHTML=html;});
+};
+window._debouncedSync=function(taId,hlId){
+  clearTimeout(window._hlTimers[taId]);
+  window._hlTimers[taId]=setTimeout(function(){_syncHighlight(taId,hlId);},150);
+};
+var edTA=document.getElementById('sandbox-editor');
+var tsTA=document.getElementById('sandbox-tests');
+edTA.addEventListener('input',function(){_autoSize(this);_debouncedSync('sandbox-editor','sandbox-editor-hl');});
+tsTA.addEventListener('input',function(){_autoSize(this);_debouncedSync('sandbox-tests','sandbox-tests-hl');});
+edTA.addEventListener('scroll',function(){var p=this.parentNode.querySelector('.editor-highlight');p.scrollTop=this.scrollTop;p.scrollLeft=this.scrollLeft;});
+tsTA.addEventListener('scroll',function(){var p=this.parentNode.querySelector('.editor-highlight');p.scrollTop=this.scrollTop;p.scrollLeft=this.scrollLeft;});
+window._runCombined=function(){
+  var code=document.getElementById('sandbox-editor').value;
+  var tests=document.getElementById('sandbox-tests').value;
+  var lang=document.getElementById('sandbox-lang').textContent;
+  _runSandbox(code,tests,lang);
+};
+window._autoScroll=true;
+document.getElementById('chat-content').addEventListener('wheel',function(){window._autoScroll=false;});
+window._logBadge=0;
+window._logIdx=-1;
+window._sandboxLangs={'python':1,'go':1,'javascript':1,'js':1,'typescript':1,'ts':1,'cpp':1,'c++':1,'rust':1,'java':1};
 window.switchTab=function(name){
-  var chatBtn=document.getElementById('tab-chat');
-  var transBtn=document.getElementById('tab-transcript');
-  var chatDiv=document.getElementById('chat-content');
-  var transDiv=document.getElementById('transcript-content');
+  var tabs=['chat','transcript','sandbox','log'];
+  for(var i=0;i<tabs.length;i++){
+    var btn=document.getElementById('tab-'+tabs[i]);
+    var div=document.getElementById(tabs[i]+'-content');
+    if(tabs[i]===name){btn.className='active';div.className='tab-content active';}
+    else{btn.className='';div.className='tab-content';}
+  }
   if(name==='transcript'){
-    chatBtn.className='';transBtn.className='active';
-    chatDiv.className='tab-content';transDiv.className='tab-content active';
-    window._transcriptBadge=0;
-    var b=transBtn.querySelector('.tab-badge');if(b)b.remove();
-    transDiv.scrollTop=transDiv.scrollHeight;
-  } else {
-    transBtn.className='';chatBtn.className='active';
-    transDiv.className='tab-content';chatDiv.className='tab-content active';
+    document.getElementById('transcript-content').scrollTop=document.getElementById('transcript-content').scrollHeight;
+  }
+  if(name==='log'){
+    window._logBadge=0;
+    var b=document.getElementById('tab-log').querySelector('.tab-badge');if(b)b.remove();
+    document.getElementById('log-output').scrollTop=document.getElementById('log-output').scrollHeight;
   }
 };
+window._injectSandboxButtons=function(){
+  var wraps=document.querySelectorAll('#chat-content .highlight[data-lang]');
+  for(var i=0;i<wraps.length;i++){
+    var wrap=wraps[i];
+    var lang=wrap.getAttribute('data-lang');
+    if(!window._sandboxLangs[lang])continue;
+    var pre=wrap.querySelector('pre');
+    if(!pre||pre.querySelector('.sandbox-btn'))continue;
+    var code=pre.querySelector('code')||pre;
+    pre.style.position='relative';
+    var btn=document.createElement('button');
+    btn.className='sandbox-btn';
+    btn.textContent='\u25B6 Sandbox';
+    btn.onclick=(function(c,l){return function(){_sendToSandbox(c.textContent,l);};})(code,lang);
+    pre.appendChild(btn);
+  }
+};
+(function vuPump(){
+  _pollVU().then(function(js){if(js)eval(js);});
+  requestAnimationFrame(vuPump);
+})();
 setInterval(function(){
   _pollUpdates().then(function(js){if(js)eval(js);});
-},80);
+},33);
+setInterval(function(){
+  _pollLog(window._logIdx).then(function(raw){
+    if(!raw)return;
+    var entries=JSON.parse(raw);
+    if(!entries||!entries.length)return;
+    var out=document.getElementById('log-output');
+    var logTab=document.getElementById('log-content');
+    var isActive=logTab.classList.contains('active');
+    for(var i=0;i<entries.length;i++){
+      var e=entries[i];
+      var ts=e.Time?e.Time.substring(11,19):'';
+      var cls='log-'+e.Level;
+      out.innerHTML+='<span class="'+cls+'">'+ts+' ['+e.Level+'] '+e.Message+'</span>\n';
+      window._logIdx=e.Index;
+    }
+    if(isActive){out.scrollTop=out.scrollHeight;return;}
+    var errs=0;for(var j=0;j<entries.length;j++){if(entries[j].Level==='error')errs++;}
+    if(!errs)return;
+    window._logBadge+=errs;
+    var btn=document.getElementById('tab-log');
+    var b=btn.querySelector('.tab-badge');
+    if(!b){b=document.createElement('span');b.className='tab-badge';btn.appendChild(b);}
+    b.textContent=window._logBadge;
+  });
+},500);
 </script>
 </body></html>`
 }
@@ -458,6 +769,18 @@ func newMarkdownRenderer() goldmark.Markdown {
 			highlighting.NewHighlighting(
 				highlighting.WithStyle("monokai"),
 				highlighting.WithFormatOptions(chromahtml.WithClasses(true)),
+				highlighting.WithWrapperRenderer(func(w util.BufWriter, ctx highlighting.CodeBlockContext, entering bool) {
+					lang, ok := ctx.Language()
+					if entering {
+						if ok {
+							_, _ = fmt.Fprintf(w, `<div class="highlight" data-lang="%s">`, string(lang))
+							return
+						}
+						w.WriteString(`<div class="highlight">`)
+						return
+					}
+					w.WriteString(`</div>`)
+				}),
 			),
 		),
 	)
@@ -471,9 +794,20 @@ func generateChromaCSS() string {
 	return buf.String()
 }
 
+func vuColor(level float64) string {
+	if level > 0.75 {
+		return "'#e05050'"
+	}
+	if level > 0.45 {
+		return "'#e8a735'"
+	}
+	return "'#50b050'"
+}
+
 var buttonIDs = map[HotkeyAction]string{
 	HotkeyFollowUp:     "btn-voice",
 	HotkeyAudioCapture: "btn-audio",
+	HotkeySoundCheck:   "btn-soundcheck",
 }
 
 func buildFooterButtons() string {

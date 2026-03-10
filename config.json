@@ -1,0 +1,13 @@
+{
+  "configs": [
+    {
+      "name": "JavaScript-Zoom4-GPT-5-4",
+      "monitor": 0,
+      "provider": "3",
+      "renderer": "3",
+      "language": "2",
+      "audio_mode": "3",
+      "mon_source": "alsa_output.usb-ZOOM_Corporation_R24_0-00.analog-stereo.monitor"
+    }
+  ]
+}

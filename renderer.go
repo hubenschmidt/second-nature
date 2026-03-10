@@ -19,6 +19,8 @@ type Renderer interface {
 	AppendTranscriptChunk(source, text string)
 	SetMicRecording(recording bool)
 	SetAudioRecording(recording bool)
+	SetSoundCheck(active bool)
+	UpdateVU(micLevel, audioLevel float64)
 	Clear()
 	Close()
 }
@@ -111,6 +113,10 @@ func (t *TerminalRenderer) SetMicRecording(recording bool) {}
 
 func (t *TerminalRenderer) SetAudioRecording(recording bool) {}
 
+func (t *TerminalRenderer) SetSoundCheck(active bool) {}
+
+func (t *TerminalRenderer) UpdateVU(micLevel, audioLevel float64) {}
+
 func (t *TerminalRenderer) Clear() {
 	t.history.Reset()
 	t.repaint()
@@ -186,6 +192,18 @@ func (m *MultiRenderer) SetMicRecording(recording bool) {
 func (m *MultiRenderer) SetAudioRecording(recording bool) {
 	for _, r := range m.renderers {
 		r.SetAudioRecording(recording)
+	}
+}
+
+func (m *MultiRenderer) SetSoundCheck(active bool) {
+	for _, r := range m.renderers {
+		r.SetSoundCheck(active)
+	}
+}
+
+func (m *MultiRenderer) UpdateVU(micLevel, audioLevel float64) {
+	for _, r := range m.renderers {
+		r.UpdateVU(micLevel, audioLevel)
 	}
 }
 

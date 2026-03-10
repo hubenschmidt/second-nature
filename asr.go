@@ -167,13 +167,18 @@ func (r *Recorder) SampleCount() int {
 	return len(r.samples)
 }
 
+const overlapSamples = 8000 // 0.5s at 16kHz — gives Whisper word-boundary context
+
 func (r *Recorder) DrainSamples() []int16 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	out := make([]int16, len(r.samples))
 	copy(out, r.samples)
-	r.samples = r.samples[:0]
+
+	if len(r.samples) > overlapSamples {
+		r.samples = r.samples[len(r.samples)-overlapSamples:]
+	}
 	return out
 }
 

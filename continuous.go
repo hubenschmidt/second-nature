@@ -15,10 +15,12 @@ type SummarizeFn func(text string) (string, error)
 
 const (
 	silenceThreshold   = 500.0
-	minChunkDuration   = 8 * time.Second
-	maxChunkDuration   = 15 * time.Second
-	pollInterval       = 200 * time.Millisecond
-	silenceWindow      = 8000  // 0.5s at 16kHz
+	minChunkDuration    = 12 * time.Second
+	maxChunkDuration    = 25 * time.Second
+	micMinChunkDuration = 5 * time.Second
+	micMaxChunkDuration = 15 * time.Second
+	pollInterval        = 200 * time.Millisecond
+	silenceWindow       = 16000 // 1s at 16kHz
 	summarizeThreshold = 3000  // chars of raw text before triggering summarization
 	maxSummaryChars    = 16000 // ~4K tokens budget for summary history
 	maxRawChars        = 16000 // ~4K tokens budget for recent raw
@@ -276,6 +278,12 @@ func (ac *AudioCapture) doSummarize() {
 // RunChunkLoop polls for silence-based chunk boundaries while active.
 // Must be called in a goroutine.
 func (ac *AudioCapture) RunChunkLoop() {
+	runChunkLoop(minChunkDuration, maxChunkDuration, ac.recorder, ac.stopCh, ac.TranscribeNow)
+}
+
+// runChunkLoop is a generic chunk-boundary poller parameterized by timing,
+// recorder, stop channel, and a transcribe callback.
+func runChunkLoop(minDur, maxDur time.Duration, recorder *Recorder, stopCh <-chan struct{}, transcribe func()) {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
@@ -283,34 +291,29 @@ func (ac *AudioCapture) RunChunkLoop() {
 
 	for {
 		select {
-		case <-ac.stopCh:
+		case <-stopCh:
 			return
 		case <-ticker.C:
 		}
 
 		elapsed := time.Since(chunkStart)
+		forced := elapsed >= maxDur
+		silent := elapsed >= minDur && recorder.PeekTailRMS(silenceWindow) < silenceThreshold
 
-		// Too early — keep accumulating
-		if elapsed < minChunkDuration {
-			continue
-		}
-
-		// Backstop — force drain regardless of silence
-		if elapsed >= maxChunkDuration {
-			ac.TranscribeNow()
+		if forced || silent {
+			transcribe()
 			chunkStart = time.Now()
-			continue
 		}
-
-		// Between min and max: drain only on silence
-		tailRMS := ac.recorder.PeekTailRMS(silenceWindow)
-		if tailRMS >= silenceThreshold {
-			continue
-		}
-
-		ac.TranscribeNow()
-		chunkStart = time.Now()
 	}
+}
+
+// PeekTailRMS returns the normalized (0–1) RMS level of the last n audio samples.
+// Returns 0 when not actively recording.
+func (ac *AudioCapture) PeekTailRMS(n int) float64 {
+	if !ac.active.Load() {
+		return 0
+	}
+	return ac.recorder.PeekTailRMS(n) / 32768.0
 }
 
 func rms(samples []int16) float64 {

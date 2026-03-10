@@ -18,6 +18,7 @@ const (
 	HotkeyAudioSend                        // Right+Down (send accumulated transcript to LLM)
 	HotkeyToggleView                       // Right+Up (toggle transcript/chat view)
 	HotkeyClear                            // Right+Left+Up+Down (clear conversation history)
+	HotkeySoundCheck                       // overlay-button only
 )
 
 var keyLabels = map[HotkeyAction]string{
@@ -26,6 +27,7 @@ var keyLabels = map[HotkeyAction]string{
 	HotkeyFollowUp:     "↑↓ mic",
 	HotkeyAudioSend:    "→↓ process",
 	HotkeyClear:        "←→↑↓ clear",
+	HotkeySoundCheck:   "🔊 check",
 }
 
 var keyOrder = []HotkeyAction{
@@ -33,6 +35,7 @@ var keyOrder = []HotkeyAction{
 	HotkeyAudioCapture,
 	HotkeyFollowUp,
 	HotkeyAudioSend,
+	HotkeySoundCheck,
 	HotkeyClear,
 }
 
@@ -42,6 +45,7 @@ var actionNames = map[HotkeyAction]string{
 	HotkeyExplain:      "explain",
 	HotkeyAudioCapture: "audio",
 	HotkeyAudioSend:    "send",
+	HotkeySoundCheck:   "soundcheck",
 	HotkeyClear:        "clear",
 }
 
