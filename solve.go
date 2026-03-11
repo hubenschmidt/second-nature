@@ -59,13 +59,14 @@ func streamText(stream *ssestream.Stream[anthropic.MessageStreamEventUnion], onD
 	return buf.String(), nil
 }
 
-func (p *AnthropicProvider) Solve(pngData []byte, transcript string, onDelta func(string)) (string, error) {
-	b64 := base64.StdEncoding.EncodeToString(pngData)
+func (p *AnthropicProvider) Solve(images [][]byte, transcript string, onDelta func(string)) (string, error) {
+	var blocks []anthropic.ContentBlockParamUnion
+	for _, img := range images {
+		blocks = append(blocks, anthropic.NewImageBlockBase64("image/jpeg", base64.StdEncoding.EncodeToString(img)))
+	}
+	blocks = append(blocks, anthropic.NewTextBlock(buildSolvePrompt(p.lang, readContextPath(p.contextDir), transcript, len(images))))
 
-	p.history = append(p.history, anthropic.NewUserMessage(
-		anthropic.NewImageBlockBase64("image/jpeg", b64),
-		anthropic.NewTextBlock(buildSolvePrompt(p.lang, readContextPath(p.contextDir), transcript)),
-	))
+	p.history = append(p.history, anthropic.NewUserMessage(blocks...))
 
 	stream := p.client.Messages.NewStreaming(context.Background(), anthropic.MessageNewParams{
 		Model:     p.model,
@@ -101,6 +102,15 @@ func (p *AnthropicProvider) Summarize(text string) (string, error) {
 		return "", fmt.Errorf("summarize failed: %w", err)
 	}
 	return result, nil
+}
+
+func (p *AnthropicProvider) HistoryLen() int { return len(p.history) }
+
+func (p *AnthropicProvider) RemoveHistoryPair(userIndex int) {
+	if userIndex < 0 || userIndex+2 > len(p.history) {
+		return
+	}
+	p.history = append(p.history[:userIndex], p.history[userIndex+2:]...)
 }
 
 func (p *AnthropicProvider) FollowUp(text string, onDelta func(string)) (string, error) {

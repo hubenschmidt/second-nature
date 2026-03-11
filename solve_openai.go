@@ -10,14 +10,15 @@ import (
 	"github.com/openai/openai-go/packages/ssestream"
 	"github.com/openai/openai-go/responses"
 	"github.com/openai/openai-go/shared"
+	"github.com/openai/openai-go/shared/constant"
 )
 
 type OpenAIProvider struct {
-	client             openai.Client
-	model              shared.ResponsesModel
-	lang               string
-	contextDir         string
-	previousResponseID string
+	client     openai.Client
+	model      shared.ResponsesModel
+	lang       string
+	contextDir string
+	history    responses.ResponseInputParam
 }
 
 func NewOpenAIProvider(model shared.ResponsesModel) *OpenAIProvider {
@@ -37,11 +38,20 @@ func (p *OpenAIProvider) ContextDir() string {
 }
 
 func (p *OpenAIProvider) ClearHistory() {
-	p.previousResponseID = ""
+	p.history = nil
 }
 
 func (p *OpenAIProvider) ModelName() string {
 	return string(p.model)
+}
+
+func (p *OpenAIProvider) HistoryLen() int { return len(p.history) }
+
+func (p *OpenAIProvider) RemoveHistoryPair(userIndex int) {
+	if userIndex < 0 || userIndex+2 > len(p.history) {
+		return
+	}
+	p.history = append(p.history[:userIndex], p.history[userIndex+2:]...)
 }
 
 func streamResponses(stream *ssestream.Stream[responses.ResponseStreamEventUnion], onDelta func(string)) (string, string, error) {
@@ -65,45 +75,74 @@ func streamResponses(stream *ssestream.Stream[responses.ResponseStreamEventUnion
 	return buf.String(), responseID, nil
 }
 
-func (p *OpenAIProvider) Solve(pngData []byte, transcript string, onDelta func(string)) (string, error) {
-	b64 := base64.StdEncoding.EncodeToString(pngData)
-	dataURL := "data:image/jpeg;base64," + b64
-
-	params := responses.ResponseNewParams{
-		Model:           p.model,
-		MaxOutputTokens: openai.Int(4096),
-		Input: responses.ResponseNewParamsInputUnion{
-			OfInputItemList: responses.ResponseInputParam{
-				{OfMessage: &responses.EasyInputMessageParam{
-					Role: "user",
-					Content: responses.EasyInputMessageContentUnionParam{
-						OfInputItemContentList: responses.ResponseInputMessageContentListParam{
-							responses.ResponseInputContentParamOfInputText(buildSolvePrompt(p.lang, readContextPath(p.contextDir), transcript)),
-							{OfInputImage: &responses.ResponseInputImageParam{
-								ImageURL: openai.String(dataURL),
-								Detail:   "high",
-							}},
-						},
-					},
-				}},
+func (p *OpenAIProvider) buildUserItem(contentList responses.ResponseInputMessageContentListParam) responses.ResponseInputItemUnionParam {
+	return responses.ResponseInputItemUnionParam{
+		OfMessage: &responses.EasyInputMessageParam{
+			Role: "user",
+			Content: responses.EasyInputMessageContentUnionParam{
+				OfInputItemContentList: contentList,
 			},
 		},
 	}
+}
 
-	if p.previousResponseID != "" {
-		params.PreviousResponseID = openai.String(p.previousResponseID)
+func (p *OpenAIProvider) buildAssistantItem(text, id string) responses.ResponseInputItemUnionParam {
+	return responses.ResponseInputItemUnionParam{
+		OfOutputMessage: &responses.ResponseOutputMessageParam{
+			ID: id,
+			Content: []responses.ResponseOutputMessageContentUnionParam{{
+				OfOutputText: &responses.ResponseOutputTextParam{
+					Text: text,
+					Type: constant.ValueOf[constant.OutputText](),
+				},
+			}},
+			Status: responses.ResponseOutputMessageStatusCompleted,
+			Role:   constant.ValueOf[constant.Assistant](),
+			Type:   constant.ValueOf[constant.Message](),
+		},
+	}
+}
+
+func (p *OpenAIProvider) sendHistory(maxTokens int64, onDelta func(string)) (string, string, error) {
+	params := responses.ResponseNewParams{
+		Model:           p.model,
+		MaxOutputTokens: openai.Int(maxTokens),
+		Input: responses.ResponseNewParamsInputUnion{
+			OfInputItemList: p.history,
+		},
+	}
+	stream := p.client.Responses.NewStreaming(context.Background(), params)
+	return streamResponses(stream, onDelta)
+}
+
+func (p *OpenAIProvider) Solve(images [][]byte, transcript string, onDelta func(string)) (string, error) {
+	contentList := responses.ResponseInputMessageContentListParam{
+		responses.ResponseInputContentParamOfInputText(buildSolvePrompt(p.lang, readContextPath(p.contextDir), transcript, len(images))),
+	}
+	for _, img := range images {
+		dataURL := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(img)
+		contentList = append(contentList, responses.ResponseInputContentUnionParam{
+			OfInputImage: &responses.ResponseInputImageParam{
+				ImageURL: openai.String(dataURL),
+				Detail:   "high",
+			},
+		})
 	}
 
-	stream := p.client.Responses.NewStreaming(context.Background(), params)
+	userItem := p.buildUserItem(contentList)
+	p.history = append(p.history, userItem)
 
-	text, respID, err := streamResponses(stream, onDelta)
+	text, respID, err := p.sendHistory(4096, onDelta)
 	if err != nil {
+		p.history = p.history[:len(p.history)-1]
 		return "", err
 	}
 	if text == "" {
+		p.history = p.history[:len(p.history)-1]
 		return "", fmt.Errorf("no text in response")
 	}
-	p.previousResponseID = respID
+
+	p.history = append(p.history, p.buildAssistantItem(text, respID))
 	return text, nil
 }
 
@@ -135,36 +174,23 @@ func (p *OpenAIProvider) Summarize(text string) (string, error) {
 
 func (p *OpenAIProvider) FollowUp(text string, onDelta func(string)) (string, error) {
 	msg := readContextPath(p.contextDir) + text
-	params := responses.ResponseNewParams{
-		Model:           p.model,
-		MaxOutputTokens: openai.Int(4096),
-		Input: responses.ResponseNewParamsInputUnion{
-			OfInputItemList: responses.ResponseInputParam{
-				{OfMessage: &responses.EasyInputMessageParam{
-					Role: "user",
-					Content: responses.EasyInputMessageContentUnionParam{
-						OfInputItemContentList: responses.ResponseInputMessageContentListParam{
-							responses.ResponseInputContentParamOfInputText(msg),
-						},
-					},
-				}},
-			},
-		},
+	contentList := responses.ResponseInputMessageContentListParam{
+		responses.ResponseInputContentParamOfInputText(msg),
 	}
 
-	if p.previousResponseID != "" {
-		params.PreviousResponseID = openai.String(p.previousResponseID)
-	}
+	userItem := p.buildUserItem(contentList)
+	p.history = append(p.history, userItem)
 
-	stream := p.client.Responses.NewStreaming(context.Background(), params)
-
-	reply, respID, err := streamResponses(stream, onDelta)
+	reply, respID, err := p.sendHistory(4096, onDelta)
 	if err != nil {
+		p.history = p.history[:len(p.history)-1]
 		return "", err
 	}
 	if reply == "" {
+		p.history = p.history[:len(p.history)-1]
 		return "", fmt.Errorf("no text in response")
 	}
-	p.previousResponseID = respID
+
+	p.history = append(p.history, p.buildAssistantItem(reply, respID))
 	return reply, nil
 }

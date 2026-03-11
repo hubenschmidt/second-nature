@@ -33,8 +33,10 @@ const (
 // TranscriptEntry is a UI-stable transcript chunk with a unique ID.
 // Separate from rawChunks (which feed the summarization pipeline and get drained).
 type TranscriptEntry struct {
-	ID   int
-	Text string
+	ID     int
+	Text   string
+	Source string
+	Time   time.Time
 }
 
 type micStamp struct {
@@ -172,13 +174,11 @@ func (ac *AudioCapture) BuildContext() string {
 		b.WriteString(raw)
 	}
 
-	// Drain
+	// Drain internal buffers (preserve entries for Context tab visibility)
 	ac.summaries = nil
 	ac.rawChunks = nil
 	ac.rawCharCount = 0
 	ac.retryCount = 0
-	ac.entries = nil
-	ac.selected = make(map[int]bool)
 
 	return strings.TrimSpace(b.String())
 }
@@ -247,7 +247,7 @@ func (ac *AudioCapture) TranscribeNow() {
 	ac.rawCharCount += len(trimmed)
 	id := ac.nextID
 	ac.nextID++
-	ac.entries = append(ac.entries, TranscriptEntry{ID: id, Text: trimmed})
+	ac.entries = append(ac.entries, TranscriptEntry{ID: id, Text: trimmed, Source: "audio", Time: time.Now()})
 	n := ac.rawCharCount
 	for _, s := range ac.summaries {
 		n += len(s)
@@ -323,13 +323,25 @@ func (ac *AudioCapture) doSummarize() {
 }
 
 // AddEntry appends a transcript entry and returns its ID.
-func (ac *AudioCapture) AddEntry(text string) int {
+func (ac *AudioCapture) AddEntry(source, text string) int {
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 	id := ac.nextID
 	ac.nextID++
-	ac.entries = append(ac.entries, TranscriptEntry{ID: id, Text: text})
+	ac.entries = append(ac.entries, TranscriptEntry{ID: id, Text: text, Source: source, Time: time.Now()})
 	return id
+}
+
+func (ac *AudioCapture) RemoveEntry(id int) {
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+	delete(ac.selected, id)
+	for i, e := range ac.entries {
+		if e.ID == id {
+			ac.entries = append(ac.entries[:i], ac.entries[i+1:]...)
+			return
+		}
+	}
 }
 
 // ToggleSelection marks or unmarks a transcript entry for selective sending.
@@ -363,11 +375,48 @@ func (ac *AudioCapture) BuildSelectedContext() string {
 	return strings.Join(parts, " ")
 }
 
+// Entries returns a copy of all transcript entries.
+func (ac *AudioCapture) Entries() []TranscriptEntry {
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+	cp := make([]TranscriptEntry, len(ac.entries))
+	copy(cp, ac.entries)
+	return cp
+}
+
+// SelectedMap returns a copy of the selected entry IDs.
+func (ac *AudioCapture) SelectedMap() map[int]bool {
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+	cp := make(map[int]bool, len(ac.selected))
+	for k, v := range ac.selected {
+		cp[k] = v
+	}
+	return cp
+}
+
 // ClearSelections clears all selected transcript entries.
 func (ac *AudioCapture) ClearSelections() {
 	ac.mu.Lock()
 	ac.selected = make(map[int]bool)
 	ac.mu.Unlock()
+}
+
+// TranscriptSummary returns a compact one-line-per-entry string with timestamps and sources.
+func (ac *AudioCapture) TranscriptSummary() string {
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+	var buf strings.Builder
+	for _, e := range ac.entries {
+		buf.WriteString("[")
+		buf.WriteString(e.Time.Format("15:04:05"))
+		buf.WriteString(" ")
+		buf.WriteString(e.Source)
+		buf.WriteString("] ")
+		buf.WriteString(e.Text)
+		buf.WriteString("\n")
+	}
+	return buf.String()
 }
 
 // ClearAll resets all accumulated state (raw chunks, summaries, entries, selections).

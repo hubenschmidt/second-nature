@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,30 +26,206 @@ import (
 
 const configPath = "config.json"
 
-// AppState holds accumulated inputs (screenshot, etc.) until the user triggers Process.
-type AppState struct {
-	mu         sync.Mutex
-	screenshot []byte
+type ScreenshotEntry struct {
+	ID   int
+	Data []byte
+	Time time.Time
 }
 
-func (s *AppState) SetScreenshot(data []byte) {
+const maxScreenshots = 10
+
+type Trace struct {
+	ID                int
+	Time              time.Time
+	ScreenCount       int
+	ScreenTimes       []time.Time
+	HasTranscript     bool
+	HasContext         bool
+	ContextDir        string
+	ContextFiles      []string
+	TranscriptSnippet string
+	HistoryIndex      int
+}
+
+// AppState holds accumulated inputs (screenshots, etc.) until the user triggers Process.
+type AppState struct {
+	mu          sync.Mutex
+	shots       []ScreenshotEntry
+	selected    map[int]bool
+	nextID      int
+	traces      []Trace
+	nextTraceID int
+}
+
+func (s *AppState) AddScreenshot(data []byte) int {
 	s.mu.Lock()
-	s.screenshot = data
+	defer s.mu.Unlock()
+	if s.selected == nil {
+		s.selected = make(map[int]bool)
+	}
+	id := s.nextID
+	s.nextID++
+	s.shots = append(s.shots, ScreenshotEntry{ID: id, Data: data, Time: time.Now()})
+	s.selected[id] = true
+	// auto-prune oldest if over cap
+	for len(s.shots) > maxScreenshots {
+		delete(s.selected, s.shots[0].ID)
+		s.shots = s.shots[1:]
+	}
+	return id
+}
+
+func (s *AppState) RemoveScreenshot(id int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.selected, id)
+	for i, e := range s.shots {
+		if e.ID == id {
+			s.shots = append(s.shots[:i], s.shots[i+1:]...)
+			return
+		}
+	}
+}
+
+func (s *AppState) ToggleScreenshot(id int, on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.selected == nil {
+		s.selected = make(map[int]bool)
+	}
+	if on {
+		s.selected[id] = true
+		return
+	}
+	delete(s.selected, id)
+}
+
+// SelectedScreenshots returns checked screenshots, or all if none checked.
+func (s *AppState) SelectedScreenshots() [][]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.shots) == 0 {
+		return nil
+	}
+	// If any selected, return only those
+	if len(s.selected) > 0 {
+		var out [][]byte
+		for _, e := range s.shots {
+			if s.selected[e.ID] {
+				out = append(out, e.Data)
+			}
+		}
+		return out
+	}
+	// None selected → return all
+	out := make([][]byte, len(s.shots))
+	for i, e := range s.shots {
+		out[i] = e.Data
+	}
+	return out
+}
+
+func (s *AppState) SelectedScreenshotTimes() []time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var times []time.Time
+	for _, e := range s.shots {
+		if len(s.selected) == 0 || s.selected[e.ID] {
+			times = append(times, e.Time)
+		}
+	}
+	return times
+}
+
+func (s *AppState) ClearSelections() {
+	s.mu.Lock()
+	s.selected = nil
 	s.mu.Unlock()
 }
 
-func (s *AppState) ConsumeScreenshot() ([]byte, bool) {
+func (s *AppState) ScreenshotCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	data := s.screenshot
-	s.screenshot = nil
-	return data, len(data) > 0
+	return len(s.shots)
+}
+
+func (s *AppState) ClearScreenshots() {
+	s.mu.Lock()
+	s.shots = nil
+	s.selected = nil
+	s.mu.Unlock()
 }
 
 func (s *AppState) Clear() {
 	s.mu.Lock()
-	s.screenshot = nil
+	s.shots = nil
+	s.selected = nil
+	s.traces = nil
 	s.mu.Unlock()
+}
+
+func (s *AppState) AddTrace(screenCount int, screenTimes []time.Time, hasTranscript, hasContext bool, contextDir string, contextFiles []string, transcriptSnippet string, historyIndex int) Trace {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id := s.nextTraceID
+	s.nextTraceID++
+	if len(transcriptSnippet) > 200 {
+		transcriptSnippet = transcriptSnippet[:200]
+	}
+	t := Trace{
+		ID:                id,
+		Time:              time.Now(),
+		ScreenCount:       screenCount,
+		ScreenTimes:       screenTimes,
+		HasTranscript:     hasTranscript,
+		HasContext:         hasContext,
+		ContextDir:        contextDir,
+		ContextFiles:      contextFiles,
+		TranscriptSnippet: transcriptSnippet,
+		HistoryIndex:      historyIndex,
+	}
+	s.traces = append(s.traces, t)
+	return t
+}
+
+func (s *AppState) RemoveTrace(id int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, t := range s.traces {
+		if t.ID == id {
+			s.traces = append(s.traces[:i], s.traces[i+1:]...)
+			return
+		}
+	}
+}
+
+func (s *AppState) GetTrace(id int) *Trace {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, t := range s.traces {
+		if t.ID == id {
+			return &s.traces[i]
+		}
+	}
+	return nil
+}
+
+func (s *AppState) Traces() []Trace {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Trace, len(s.traces))
+	copy(out, s.traces)
+	return out
+}
+
+func (s *AppState) AdjustTraceIndicesAfter(idx, delta int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.traces {
+		if s.traces[i].HistoryIndex > idx {
+			s.traces[i].HistoryIndex += delta
+		}
+	}
 }
 
 type AppConfig struct {
@@ -406,6 +583,8 @@ func main() {
 	}
 
 	overlay.SetProvider(provider)
+	overlay.SetAppState(&appState)
+	overlay.SetAudioCapture(ac)
 	if overlayMonitor >= 0 && overlayMonitor < len(monitors) {
 		m := monitors[overlayMonitor]
 		overlay.MoveToMonitor(m.X, m.Y)
@@ -415,6 +594,28 @@ func main() {
 	}
 	overlay.SetToggleChunkHandler(func(id int, checked bool) {
 		ac.ToggleSelection(id, checked)
+	})
+	overlay.SetToggleScreenshotHandler(func(id int, checked bool) {
+		appState.ToggleScreenshot(id, checked)
+	})
+	overlay.SetRemoveScreenshotHandler(func(id int) {
+		appState.RemoveScreenshot(id)
+		overlay.RemoveScreenshot(id)
+		overlay.SetScreenCount(appState.ScreenshotCount())
+	})
+	overlay.SetRemoveTracesHandler(func(ids []int) {
+		sort.Sort(sort.Reverse(sort.IntSlice(ids)))
+		for _, id := range ids {
+			t := appState.GetTrace(id)
+			if t == nil {
+				return
+			}
+			hi := t.HistoryIndex
+			provider.RemoveHistoryPair(hi)
+			appState.RemoveTrace(id)
+			appState.AdjustTraceIndicesAfter(hi, -2)
+			renderer.RemoveObserveTrace(id)
+		}
 	})
 	overlay.SetActionHandler(func(a HotkeyAction) {
 		select {
@@ -670,7 +871,7 @@ func handleAction(action HotkeyAction, monitorIdx int, provider Provider, render
 		},
 		HotkeyExplain: func() {
 			llmGuardAsync(llmBusy, renderer, func() {
-				handleExplain(provider, renderer)
+				handleExplain(provider, renderer, appState)
 			})
 		},
 		HotkeyAudioCapture: func() {
@@ -690,13 +891,14 @@ func handleAction(action HotkeyAction, monitorIdx int, provider Provider, render
 		},
 		HotkeyImplement: func() {
 			llmGuardAsync(llmBusy, renderer, func() {
-				handleImplement(provider, renderer, lang)
+				handleImplement(provider, renderer, lang, appState)
 			})
 		},
 		HotkeyClear: func() {
 			stopMic(recorder, renderer, micStopCh)
 			appState.Clear()
 			ac.ClearAll()
+			CtxFileSelection.Clear()
 			provider.ClearHistory()
 			renderer.Clear()
 		},
@@ -723,11 +925,29 @@ func finishStream(renderer Renderer, ac *AudioCapture) {
 	renderer.ClearTranscriptCheckboxes()
 }
 
-func handleProcess(ac *AudioCapture, provider Provider, renderer Renderer, lang string, appState *AppState) {
-	screenshot, hasScreen := appState.ConsumeScreenshot()
-	if hasScreen {
-		renderer.SetScreenLoaded(false)
+func solveStatusLabel(screenCount, fileCount int, hasTranscript bool) string {
+	parts := []string{fmt.Sprintf("%d screenshot(s)", screenCount)}
+	if fileCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d source file(s)", fileCount))
 	}
+	if hasTranscript {
+		parts = append(parts, "transcript")
+	}
+	return strings.Join(parts, ", ")
+}
+
+func clearContextIfEnabled(appState *AppState, ac *AudioCapture, renderer Renderer) {
+	if !clearOnProcess.Load() {
+		return
+	}
+	appState.ClearScreenshots()
+	ac.ClearAll()
+	renderer.ClearContextData()
+}
+
+func handleProcess(ac *AudioCapture, provider Provider, renderer Renderer, lang string, appState *AppState) {
+	screenshots := appState.SelectedScreenshots()
+	hasScreen := len(screenshots) > 0
 
 	transcript := ac.BuildSelectedContext()
 	if transcript == "" {
@@ -741,25 +961,36 @@ func handleProcess(ac *AudioCapture, provider Provider, renderer Renderer, lang 
 		return
 	}
 
+	ctxFiles := listContextFiles(provider.ContextDir())
+	screenTimes := appState.SelectedScreenshotTimes()
+	transcriptSummary := ac.TranscriptSummary()
+	trace := appState.AddTrace(len(screenshots), screenTimes, transcript != "", hasContext, provider.ContextDir(), ctxFiles, transcriptSummary, provider.HistoryLen())
+	renderer.SetCurrentTraceID(trace.ID)
 	renderer.AppendStreamStart()
 
 	if hasScreen {
-		renderer.SetStatus("solving...")
-		_, err := provider.Solve(screenshot, transcript, func(delta string) {
+		renderer.SetStatus("solving with " + solveStatusLabel(len(screenshots), len(ctxFiles), transcript != "") + "...")
+		_, err := provider.Solve(screenshots, transcript, func(delta string) {
 			renderer.AppendStreamDelta(delta)
 		})
 		if err != nil {
 			renderer.SetStatus("solve error: " + err.Error())
+			appState.RemoveTrace(trace.ID)
 			return
 		}
+		renderer.AddObserveTrace(trace)
+		appState.ClearSelections()
+		renderer.ClearScreenshotCheckboxes()
 		finishStream(renderer, ac)
+		clearContextIfEnabled(appState, ac, renderer)
 		return
 	}
 
 	fence := fenceLang(lang)
-	prompt := "Based on the provided context files, first analyze the problem and requirements, then implement the complete working solution in " + lang + ". Use markdown fenced code blocks (```" + fence + ") for all code.\n\n" + codeRules
+	receipt := buildContextReceipt(0, hasContext, transcript != "")
+	prompt := receipt + "Based on the provided context files, first analyze the problem and requirements, then implement the complete working solution in " + lang + ". Use markdown fenced code blocks (```" + fence + ") for all code.\n\n" + codeRules
 	if transcript != "" {
-		prompt = audioSendPrefix(lang) + transcript + "\n\n" + codeRules
+		prompt = receipt + audioSendPrefix(lang) + transcript + "\n\n" + codeRules
 	}
 	renderer.SetStatus("sending to LLM...")
 	_, err := provider.FollowUp(prompt, func(delta string) {
@@ -767,9 +998,12 @@ func handleProcess(ac *AudioCapture, provider Provider, renderer Renderer, lang 
 	})
 	if err != nil {
 		renderer.SetStatus("follow-up error: " + err.Error())
+		appState.RemoveTrace(trace.ID)
 		return
 	}
+	renderer.AddObserveTrace(trace)
 	finishStream(renderer, ac)
+	clearContextIfEnabled(appState, ac, renderer)
 }
 
 func handleMicStart(recorder *Recorder, renderer Renderer, ac *AudioCapture, whisperURL string) chan struct{} {
@@ -807,7 +1041,7 @@ func transcribeAndAppend(samples []int16, renderer Renderer, ac *AudioCapture, w
 		return false
 	}
 	ac.RecordMicText(trimmed)
-	id := ac.AddEntry(trimmed)
+	id := ac.AddEntry("mic", trimmed)
 	ac.AppendTranscript(trimmed)
 	renderer.AppendTranscriptChunk("mic", trimmed, id)
 	renderer.SetStatus(fmt.Sprintf("%s — %d chars accumulated", statusPrefix, ac.TranscriptLen()))
@@ -829,7 +1063,9 @@ func micTranscribeChunk(recorder *Recorder, renderer Renderer, ac *AudioCapture,
 	transcribeAndAppend(recorder.DrainSamples(), renderer, ac, whisperURL, "mic")
 }
 
-func handleExplain(provider Provider, renderer Renderer) {
+func handleExplain(provider Provider, renderer Renderer, appState *AppState) {
+	trace := appState.AddTrace(0, nil, false, false, "", nil, "", provider.HistoryLen())
+	renderer.SetCurrentTraceID(trace.ID)
 	renderer.SetStatus("thinking...")
 	renderer.AppendStreamStart()
 	_, err := provider.FollowUp("Explain further in more detail.", func(delta string) {
@@ -837,17 +1073,21 @@ func handleExplain(provider Provider, renderer Renderer) {
 	})
 	if err != nil {
 		renderer.SetStatus("follow-up error: " + err.Error())
+		appState.RemoveTrace(trace.ID)
 		return
 	}
+	renderer.AddObserveTrace(trace)
 	renderer.AppendStreamDone()
 	renderer.SetStatus("")
 }
 
-func handleImplement(provider Provider, renderer Renderer, lang string) {
+func handleImplement(provider Provider, renderer Renderer, lang string, appState *AppState) {
 	fence := fenceLang(lang)
 	prompt := "Based on our conversation so far, please implement the complete, working solution in " + lang + ". " +
 		"Use markdown fenced code blocks (```" + fence + ") for all code. Keep explanations minimal.\n\n" + codeRules
 
+	trace := appState.AddTrace(0, nil, false, false, "", nil, "", provider.HistoryLen())
+	renderer.SetCurrentTraceID(trace.ID)
 	renderer.SetStatus("implementing...")
 	renderer.AppendStreamStart()
 	_, err := provider.FollowUp(prompt, func(delta string) {
@@ -855,8 +1095,10 @@ func handleImplement(provider Provider, renderer Renderer, lang string) {
 	})
 	if err != nil {
 		renderer.SetStatus("follow-up error: " + err.Error())
+		appState.RemoveTrace(trace.ID)
 		return
 	}
+	renderer.AddObserveTrace(trace)
 	renderer.AppendStreamDone()
 	renderer.SetStatus("")
 }
@@ -1086,7 +1328,8 @@ func handleCaptureStore(monitorIdx int, renderer Renderer, appState *AppState) {
 		renderer.SetStatus("capture error: " + err.Error())
 		return
 	}
-	appState.SetScreenshot(imgData)
-	renderer.SetScreenLoaded(true)
+	id := appState.AddScreenshot(imgData)
+	renderer.AppendScreenshot(id, imgData)
+	renderer.SetScreenCount(appState.ScreenshotCount())
 	renderer.SetStatus("screen captured — ready to process")
 }

@@ -22,7 +22,14 @@ type Renderer interface {
 	SetAudioRecording(recording bool)
 	SetSoundCheck(active bool)
 	UpdateVU(micLevel, audioLevel float64)
-	SetScreenLoaded(loaded bool)
+	AppendScreenshot(id int, data []byte)
+	RemoveScreenshot(id int)
+	ClearScreenshotCheckboxes()
+	SetScreenCount(count int)
+	SetCurrentTraceID(id int)
+	AddObserveTrace(trace Trace)
+	RemoveObserveTrace(traceID int)
+	ClearContextData()
 	Clear()
 	Close()
 }
@@ -121,7 +128,21 @@ func (t *TerminalRenderer) SetSoundCheck(active bool) {}
 
 func (t *TerminalRenderer) UpdateVU(micLevel, audioLevel float64) {}
 
-func (t *TerminalRenderer) SetScreenLoaded(loaded bool) {}
+func (t *TerminalRenderer) AppendScreenshot(id int, data []byte) {}
+
+func (t *TerminalRenderer) RemoveScreenshot(id int) {}
+
+func (t *TerminalRenderer) ClearScreenshotCheckboxes() {}
+
+func (t *TerminalRenderer) SetScreenCount(count int) {}
+
+func (t *TerminalRenderer) SetCurrentTraceID(id int) {}
+
+func (t *TerminalRenderer) AddObserveTrace(trace Trace) {}
+
+func (t *TerminalRenderer) RemoveObserveTrace(traceID int) {}
+
+func (t *TerminalRenderer) ClearContextData() {}
 
 func (t *TerminalRenderer) Clear() {
 	t.history.Reset()
@@ -219,9 +240,51 @@ func (m *MultiRenderer) UpdateVU(micLevel, audioLevel float64) {
 	}
 }
 
-func (m *MultiRenderer) SetScreenLoaded(loaded bool) {
+func (m *MultiRenderer) AppendScreenshot(id int, data []byte) {
 	for _, r := range m.renderers {
-		r.SetScreenLoaded(loaded)
+		r.AppendScreenshot(id, data)
+	}
+}
+
+func (m *MultiRenderer) RemoveScreenshot(id int) {
+	for _, r := range m.renderers {
+		r.RemoveScreenshot(id)
+	}
+}
+
+func (m *MultiRenderer) ClearScreenshotCheckboxes() {
+	for _, r := range m.renderers {
+		r.ClearScreenshotCheckboxes()
+	}
+}
+
+func (m *MultiRenderer) SetScreenCount(count int) {
+	for _, r := range m.renderers {
+		r.SetScreenCount(count)
+	}
+}
+
+func (m *MultiRenderer) SetCurrentTraceID(id int) {
+	for _, r := range m.renderers {
+		r.SetCurrentTraceID(id)
+	}
+}
+
+func (m *MultiRenderer) AddObserveTrace(trace Trace) {
+	for _, r := range m.renderers {
+		r.AddObserveTrace(trace)
+	}
+}
+
+func (m *MultiRenderer) RemoveObserveTrace(traceID int) {
+	for _, r := range m.renderers {
+		r.RemoveObserveTrace(traceID)
+	}
+}
+
+func (m *MultiRenderer) ClearContextData() {
+	for _, r := range m.renderers {
+		r.ClearContextData()
 	}
 }
 

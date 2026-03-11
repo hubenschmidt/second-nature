@@ -1,5 +1,10 @@
 package main
 
+import (
+	"fmt"
+	"strings"
+)
+
 const codeRules = `**Code rules (always follow):**
 - KISS — keep solutions simple and straightforward.
 - YAGNI — only implement what is needed, no speculative features.
@@ -11,10 +16,29 @@ const codeRules = `**Code rules (always follow):**
 - If JavaScript/TypeScript: use modern ES6+ syntax (arrow functions, const/let, template literals, destructuring, for...of).
 - Be concise — avoid filler and unnecessary elaboration.`
 
-func buildSolvePrompt(lang, contextText, transcript string) string {
-	prefix := ""
+func buildContextReceipt(imageCount int, hasContext bool, hasTranscript bool) string {
+	parts := []string{}
+	if imageCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d screenshot(s)", imageCount))
+	}
+	if hasContext {
+		parts = append(parts, "source files")
+	}
+	if hasTranscript {
+		parts = append(parts, "audio transcript")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "**You have been provided the following context: " + strings.Join(parts, ", ") +
+		".** Begin your response with a `> Context:` line confirming each piece of context you received (e.g. number of screenshots, source file names, transcript presence). Then proceed with your answer.\n\n"
+}
+
+func buildSolvePrompt(lang, contextText, transcript string, imageCount int) string {
+	receipt := buildContextReceipt(imageCount, contextText != "", transcript != "")
+	prefix := receipt
 	if contextText != "" {
-		prefix = "The following source files are provided as additional context:\n\n" + contextText + "\n\n"
+		prefix += "The following source files are provided as additional context:\n\n" + contextText + "\n\n"
 	}
 	if transcript != "" {
 		prefix += "The following is the user's audio transcript providing additional instructions or context:\n\n" + transcript + "\n\n"
@@ -23,7 +47,7 @@ func buildSolvePrompt(lang, contextText, transcript string) string {
 }
 
 type Provider interface {
-	Solve(pngData []byte, transcript string, onDelta func(string)) (string, error)
+	Solve(images [][]byte, transcript string, onDelta func(string)) (string, error)
 	FollowUp(text string, onDelta func(string)) (string, error)
 	Summarize(text string) (string, error)
 	ModelName() string
@@ -31,4 +55,6 @@ type Provider interface {
 	SetContextDir(dir string)
 	ContextDir() string
 	ClearHistory()
+	HistoryLen() int
+	RemoveHistoryPair(userIndex int)
 }

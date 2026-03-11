@@ -105,8 +105,11 @@ import "C"
 
 import (
 	"bytes"
+	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -124,6 +127,14 @@ import (
 	"github.com/yuin/goldmark/util"
 )
 
+//go:embed overlay.css
+var overlayCSS string
+
+//go:embed overlay.js
+var overlayJS string
+
+var clearOnProcess atomic.Bool
+
 type OverlayRenderer struct {
 	w         webview.WebView
 	gtkWin    unsafe.Pointer
@@ -133,9 +144,15 @@ type OverlayRenderer struct {
 	pendingMu sync.Mutex
 	pendingJS strings.Builder
 	closed    atomic.Bool
-	onAction      func(HotkeyAction)
-	onToggleChunk func(int, bool)
-	provider      Provider
+	currentTraceID     int
+	onAction           func(HotkeyAction)
+	onToggleChunk      func(int, bool)
+	onToggleScreenshot func(int, bool)
+	onRemoveScreenshot func(int)
+	onRemoveTraces     func([]int)
+	appState           *AppState
+	ac                 *AudioCapture
+	provider           Provider
 	vuJS   atomic.Pointer[string]
 	fsGeom atomic.Pointer[[4]int]
 	isFS       atomic.Bool
@@ -192,6 +209,31 @@ func NewOverlayRenderer() *OverlayRenderer {
 		o.onToggleChunk(id, checked)
 	})
 
+	w.Bind("_toggleScreenshot", func(id int, checked bool) {
+		if o.onToggleScreenshot == nil {
+			return
+		}
+		o.onToggleScreenshot(id, checked)
+	})
+
+	w.Bind("_removeScreenshot", func(id int) {
+		if o.onRemoveScreenshot == nil {
+			return
+		}
+		o.onRemoveScreenshot(id)
+	})
+
+	w.Bind("_removeTraces", func(idsJSON string) {
+		if o.onRemoveTraces == nil {
+			return
+		}
+		var ids []int
+		if err := json.Unmarshal([]byte(idsJSON), &ids); err != nil {
+			return
+		}
+		o.onRemoveTraces(ids)
+	})
+
 	w.Bind("_toggleFS", func() {
 		g := o.fsGeom.Load()
 		if g == nil {
@@ -246,8 +288,39 @@ func NewOverlayRenderer() *OverlayRenderer {
 			if o.provider != nil {
 				o.provider.SetContextDir(path)
 			}
+			CtxFileSelection.Clear()
 			o.SetFileSysLabel(path)
 		}()
+	})
+
+	w.Bind("_getContextState", func() string {
+		return o.buildContextStateJSON()
+	})
+
+	w.Bind("_toggleContextFile", func(path string, excluded bool) {
+		CtxFileSelection.SetExcluded(path, excluded)
+	})
+
+	w.Bind("_removeTranscriptEntry", func(id int) {
+		if o.ac == nil {
+			return
+		}
+		o.ac.RemoveEntry(id)
+	})
+
+	w.Bind("_restoreArtifactContext", func(traceID int) {
+		t := o.appState.GetTrace(traceID)
+		if t == nil {
+			return
+		}
+		if t.ContextDir == "" {
+			return
+		}
+		if o.provider != nil {
+			o.provider.SetContextDir(t.ContextDir)
+		}
+		CtxFileSelection.Clear()
+		o.SetFileSysLabel(t.ContextDir)
 	})
 
 	// Bind a JS-callable function that drains pending JS updates.
@@ -386,6 +459,8 @@ func NewOverlayRenderer() *OverlayRenderer {
 		return buf.String()
 	})
 
+	w.Bind("_setClearOnProcess", func(on bool) { clearOnProcess.Store(on) })
+
 	w.SetHtml(o.buildShell())
 	C.show_window(gtkWin)
 	return o
@@ -399,7 +474,21 @@ func (o *OverlayRenderer) SetToggleChunkHandler(fn func(int, bool)) {
 	o.onToggleChunk = fn
 }
 
-func (o *OverlayRenderer) SetProvider(p Provider) { o.provider = p }
+func (o *OverlayRenderer) SetToggleScreenshotHandler(fn func(int, bool)) {
+	o.onToggleScreenshot = fn
+}
+
+func (o *OverlayRenderer) SetRemoveScreenshotHandler(fn func(int)) {
+	o.onRemoveScreenshot = fn
+}
+
+func (o *OverlayRenderer) SetRemoveTracesHandler(fn func([]int)) {
+	o.onRemoveTraces = fn
+}
+
+func (o *OverlayRenderer) SetProvider(p Provider)          { o.provider = p }
+func (o *OverlayRenderer) SetAppState(s *AppState)         { o.appState = s }
+func (o *OverlayRenderer) SetAudioCapture(ac *AudioCapture) { o.ac = ac }
 
 func (o *OverlayRenderer) SetFileSysLabel(path string) {
 	label := filepath.Base(path)
@@ -486,8 +575,15 @@ func (o *OverlayRenderer) wrapResponse() string {
 	if err != nil {
 		html = "<pre>" + escapeHTML(o.streamBuf.String()) + "</pre>"
 	}
-	return `<div class="response-block">` + html +
+	inner := `<div class="response-block">` + html +
 		`<button class="explain-btn" onclick="_action('explain')" title="Explain further">?</button></div>`
+	tid := o.currentTraceID
+	return fmt.Sprintf(
+		`<div class="trace-group" data-trace-id="%d">`+
+			`<div class="trace-header">`+
+			`<input type="checkbox" class="trace-cb" value="%d" onchange="_updateDeleteBtn()">`+
+			`<span class="trace-label">trace #%d</span></div>%s</div>`,
+		tid, tid, tid, inner)
 }
 
 func (o *OverlayRenderer) StreamDone() {
@@ -581,20 +677,116 @@ func (o *OverlayRenderer) UpdateVU(micLevel, audioLevel float64) {
 	o.vuJS.Store(&js)
 }
 
-func (o *OverlayRenderer) SetScreenLoaded(loaded bool) {
-	val := "false"
-	if loaded {
-		val = "true"
+func (o *OverlayRenderer) AppendScreenshot(id int, data []byte) {
+	b64 := base64.StdEncoding.EncodeToString(data)
+	ts := time.Now().Format("15:04:05")
+	html := fmt.Sprintf(
+		`<div class="ss-entry" data-id="%d">`+
+			`<input type="checkbox" class="ss-cb" checked onchange="_toggleScreenshot(%d,this.checked)">`+
+			`<button class="ss-rm" onclick="_removeScreenshot(%d)">×</button>`+
+			`<img src="data:image/jpeg;base64,%s" onclick="_viewScreenshot(this.src)">`+
+			`<span class="ss-ts">%s</span></div>`,
+		id, id, id, b64, escapeHTML(ts))
+	js := `var g=document.getElementById('screenshot-grid');` +
+		`g.innerHTML+=` + jsString(html) + `;`
+	o.eval(js)
+}
+
+func (o *OverlayRenderer) RemoveScreenshot(id int) {
+	js := fmt.Sprintf(`var el=document.querySelector('.ss-entry[data-id="%d"]');if(el)el.remove();`, id)
+	o.eval(js)
+}
+
+func (o *OverlayRenderer) ClearScreenshotCheckboxes() {
+	o.eval(`document.querySelectorAll('.ss-cb').forEach(function(cb){cb.checked=false;});`)
+}
+
+func (o *OverlayRenderer) SetScreenCount(count int) {
+	o.eval(fmt.Sprintf("window._ctxScreenCount=%d;_updateCtxDisplay();", count))
+}
+
+func (o *OverlayRenderer) SetCurrentTraceID(id int) {
+	o.currentTraceID = id
+}
+
+func (o *OverlayRenderer) AddObserveTrace(trace Trace) {
+	ts := trace.Time.Format("15:04:05")
+	var parts []string
+	if trace.ScreenCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d screenshot(s)", trace.ScreenCount))
 	}
-	o.eval("window._ctxScreen=" + val + ";_updateCtxDisplay();")
+	if trace.HasContext {
+		parts = append(parts, fmt.Sprintf("%d source file(s)", len(trace.ContextFiles)))
+	}
+	if trace.HasTranscript {
+		parts = append(parts, "transcript")
+	}
+	summary := strings.Join(parts, ", ")
+	detail := ""
+	if len(trace.ScreenTimes) > 0 {
+		var sts []string
+		for _, st := range trace.ScreenTimes {
+			sts = append(sts, st.Format("15:04:05"))
+		}
+		detail += "<div><b>Screenshots:</b> " + escapeHTML(strings.Join(sts, ", ")) + "</div>"
+	}
+	if trace.HasContext {
+		info, err := os.Stat(trace.ContextDir)
+		label := escapeHTML(trace.ContextDir)
+		if err == nil && !info.IsDir() {
+			label = escapeHTML(strings.Join(trace.ContextFiles, ", "))
+		}
+		detail += "<div><b>File sys:</b> " + label + "</div>"
+	}
+	if trace.TranscriptSnippet != "" {
+		detail += "<div><b>Transcript:</b></div><pre style=\"font-size:11px;color:#aaa;margin:2px 0;white-space:pre-wrap\">" + escapeHTML(trace.TranscriptSnippet) + "</pre>"
+	}
+	restoreBtn := ""
+	if trace.HasContext && trace.ContextDir != "" {
+		restoreBtn = fmt.Sprintf(
+			` <button class="trace-restore" onclick="event.stopPropagation();_restoreArtifactContext(%d)" title="Restore file context">&#8635;</button>`,
+			trace.ID)
+	}
+	html := fmt.Sprintf(
+		`<div class="observe-trace" data-trace-id="%d">`+
+			`<div class="observe-header" onclick="_toggleObserveTrace(%d)">`+
+			`<input type="checkbox" class="trace-cb" value="%d" onclick="event.stopPropagation();_updateDeleteBtn()">`+
+			`<span class="observe-chevron">&#9654;</span>`+
+			`<span>[%s] #%d — %s</span>%s</div>`+
+			`<div class="observe-detail">%s</div></div>`,
+		trace.ID, trace.ID, trace.ID, escapeHTML(ts), trace.ID, escapeHTML(summary), restoreBtn, detail)
+	js := `var oc=document.getElementById('trace-content');` +
+		`oc.insertAdjacentHTML('afterbegin',` + jsString(html) + `);`
+	o.eval(js)
+}
+
+func (o *OverlayRenderer) RemoveObserveTrace(traceID int) {
+	js := fmt.Sprintf(
+		`var ot=document.querySelector('.observe-trace[data-trace-id="%d"]');if(ot)ot.remove();`+
+			`var tg=document.querySelector('.trace-group[data-trace-id="%d"]');if(tg)tg.remove();`+
+			`_updateDeleteBtn();`,
+		traceID, traceID)
+	o.eval(js)
 }
 
 func (o *OverlayRenderer) Clear() {
 	js := "document.getElementById('chat-content').innerHTML='';" +
 		"document.getElementById('transcript-content').innerHTML='';" +
+		"document.getElementById('screenshot-grid').innerHTML='';" +
+		"document.getElementById('trace-content').innerHTML='';" +
+		"document.getElementById('delete-traces-btn').style.display='none';" +
+		"document.getElementById('ctx-screenshots').innerHTML='';" +
+		"document.getElementById('ctx-transcript').innerHTML='';" +
+		"document.getElementById('ctx-files').innerHTML='';" +
 		"document.getElementById('footer-status').textContent='Cleared.';" +
-		"window._ctxScreen=false;window._ctxAudio=0;window._ctxMic=0;_updateCtxDisplay();"
+		"window._ctxScreenCount=0;window._ctxAudio=0;window._ctxMic=0;_updateCtxDisplay();"
 	o.eval(js)
+}
+
+func (o *OverlayRenderer) ClearContextData() {
+	o.eval(`document.getElementById('screenshot-grid').innerHTML='';` +
+		`document.getElementById('transcript-content').innerHTML='';` +
+		`window._ctxScreenCount=0;window._ctxAudio=0;window._ctxMic=0;_updateCtxDisplay();`)
 }
 
 func (o *OverlayRenderer) Close() {
@@ -627,6 +819,74 @@ func (o *OverlayRenderer) renderSandboxResult(r SandboxResult) {
 	o.eval("document.getElementById('sandbox-output').innerHTML=" + jsString(html) + ";")
 }
 
+type ctxScreenshot struct {
+	ID       int    `json:"id"`
+	Time     string `json:"time"`
+	Selected bool   `json:"selected"`
+}
+
+type ctxTranscript struct {
+	ID       int    `json:"id"`
+	Source   string `json:"source"`
+	Text     string `json:"text"`
+	Time     string `json:"time"`
+	Selected bool   `json:"selected"`
+}
+
+type ctxFile struct {
+	Path     string `json:"path"`
+	Excluded bool   `json:"excluded"`
+}
+
+type ctxState struct {
+	Screenshots []ctxScreenshot `json:"screenshots"`
+	Transcript  []ctxTranscript `json:"transcript"`
+	Files       []ctxFile       `json:"files"`
+	ContextDir  string          `json:"contextDir"`
+}
+
+func (o *OverlayRenderer) buildContextStateJSON() string {
+	var st ctxState
+
+	if o.appState != nil {
+		o.appState.mu.Lock()
+		for _, s := range o.appState.shots {
+			st.Screenshots = append(st.Screenshots, ctxScreenshot{
+				ID:       s.ID,
+				Time:     s.Time.Format("15:04:05"),
+				Selected: o.appState.selected[s.ID],
+			})
+		}
+		o.appState.mu.Unlock()
+	}
+
+	if o.ac != nil {
+		entries := o.ac.Entries()
+		sel := o.ac.SelectedMap()
+		for _, e := range entries {
+			st.Transcript = append(st.Transcript, ctxTranscript{
+				ID:       e.ID,
+				Source:   e.Source,
+				Text:     e.Text,
+				Time:     e.Time.Format("15:04:05"),
+				Selected: sel[e.ID],
+			})
+		}
+	}
+
+	if o.provider != nil {
+		st.ContextDir = o.provider.ContextDir()
+	}
+	excluded := CtxFileSelection.ExcludedSet()
+	files := listContextFiles(st.ContextDir)
+	for _, f := range files {
+		st.Files = append(st.Files, ctxFile{Path: f, Excluded: excluded[f]})
+	}
+
+	b, _ := json.Marshal(st)
+	return string(b)
+}
+
 func (o *OverlayRenderer) markdownToHTML(md string) (string, error) {
 	var buf bytes.Buffer
 	err := o.md.Convert([]byte(md), &buf)
@@ -634,152 +894,27 @@ func (o *OverlayRenderer) markdownToHTML(md string) (string, error) {
 }
 
 func (o *OverlayRenderer) buildShell() string {
-	return `<!DOCTYPE html><html><head><style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body {
-  background: rgba(20,20,20,0.35);
-  color: #e0e0e0;
-  font-family: 'JetBrains Mono','Fira Code','Cascadia Code',monospace;
-  font-size: 13px;
-  line-height: 1.5;
-  padding: 0;
-  overflow-y: auto;
+	return `<!DOCTYPE html><html><head><style>` +
+		overlayCSS + o.chromaCS +
+		`</style></head><body>` +
+		o.buildHTML() +
+		`<script>` + overlayJS + `</script>` +
+		`</body></html>`
 }
-#tab-bar {
-  display: flex; gap: 0; border-bottom: 1px solid rgba(255,255,255,0.2);
-  background: rgba(40,40,40,0.97); position: sticky; top: 0; z-index: 10;
-}
-#tab-bar button {
-  flex: 1; background: rgba(255,255,255,0.05); border: none;
-  color: #888; font: inherit; font-size: 12px; padding: 6px 12px;
-  cursor: pointer; position: relative;
-}
-#tab-bar button.active {
-  background: rgba(255,255,255,0.12); color: #e0e0e0;
-  border-bottom: 2px solid #7ec8e3;
-}
-#tab-bar button:hover { background: rgba(255,255,255,0.1); }
-.tab-badge {
-  display: inline-block; background: #e8a735; color: #000;
-  font-size: 9px; padding: 0 4px; border-radius: 8px;
-  margin-left: 4px; vertical-align: top; min-width: 14px; text-align: center;
-}
-.tab-content {
-  padding: 8px 12px 52px; word-wrap: break-word; overflow-wrap: break-word;
-  display: none;
-}
-.tab-content.active { display: block; }
-.tab-content h1,.tab-content h2,.tab-content h3 { color: #7ec8e3; margin: 12px 0 6px; }
-.tab-content h1 { font-size: 18px; }
-.tab-content h2 { font-size: 16px; }
-.tab-content h3 { font-size: 14px; }
-.tab-content p { margin: 6px 0; }
-.tab-content ul,.tab-content ol { margin: 6px 0 6px 20px; }
-.tab-content pre {
-  background: rgba(0,0,0,0.35);
-  padding: 10px;
-  border-radius: 4px;
-  overflow-x: auto;
-  margin: 8px 0;
-  font-size: 12px;
-  white-space: pre-wrap;
-  word-wrap: break-word;
-}
-.tab-content code { font-family: inherit; }
-.tab-content p code {
-  background: rgba(255,255,255,0.1);
-  padding: 1px 4px;
-  border-radius: 3px;
-}
-.tab-content table { border-collapse: collapse; margin: 8px 0; }
-.tab-content th,.tab-content td { border: 1px solid #555; padding: 4px 8px; }
-.tab-content th { background: rgba(255,255,255,0.08); }
-.tab-content strong { color: #f0f0f0; }
-.tab-content hr { border: none; border-top: 1px solid #555; margin: 12px 0; }
-.response-block { position: relative; }
-.explain-btn {
-  position: absolute; top: 4px; right: 4px;
-  background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2);
-  color: #7ec8e3; font-size: 14px; width: 22px; height: 22px;
-  border-radius: 50%; cursor: pointer; line-height: 20px; text-align: center;
-}
-.explain-btn:hover { background: rgba(126,200,227,0.2); color: #fff; }
-.transcript-chunk {
-  display: flex; align-items: flex-start; gap: 4px;
-  padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05);
-  font-size: 12px;
-}
-.chunk-cb { margin-top: 2px; flex-shrink: 0; cursor: pointer; accent-color: #7ec8e3; }
-.transcript-chunk .ts { color: #888; }
-.transcript-chunk .src { font-weight: bold; }
-.src-audio { color: #7ec8e3; }
-.src-mic { color: #e05050; }
-@keyframes pulse-dot { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
-.rec-dot {
-  display: inline-block; width: 8px; height: 8px;
-  background: #ff4444; border-radius: 50%;
-  margin-right: 4px; vertical-align: middle;
-  animation: pulse-dot 1s ease-in-out infinite;
-}
-#footer {
-  position: fixed; bottom: 0; left: 0; right: 0;
-  background: rgba(20,20,20,0.85);
-  border-top: 1px solid rgba(255,255,255,0.15);
-  color: #888; font-size: 11px; padding: 4px 12px;
-  text-align: center;
-}
-#context-info { color: #7ec8e3; font-size: 11px; padding: 2px 0; }
-#context-info:empty { display: none; }
-#footer-status { color: #e8a735; font-size: 11px; margin-bottom: 2px; }
-#footer-btns { display:flex; gap:6px; justify-content:center; flex-wrap:wrap; }
-#footer-btns button {
-  background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.2);
-  color:#ccc; font:inherit; font-size:11px; padding:2px 8px; border-radius:3px;
-  cursor:pointer;
-}
-#footer-btns button:hover { background:rgba(255,255,255,0.18); color:#fff; }
-#footer-btns button:active { background:rgba(255,255,255,0.25); }
-#footer-btns { position:relative; }
-.ctx-popup { position:absolute; bottom:100%; left:50%; transform:translateX(-50%); background:#2a2a2a; border:1px solid #555; border-radius:4px; z-index:999; margin-bottom:4px; }
-.ctx-popup div { padding:6px 14px; cursor:pointer; white-space:nowrap; font-size:11px; color:#ccc; }
-.ctx-popup div:hover { background:#444; color:#fff; }
-#vu-meters { display:none; gap:8px; padding:2px 12px; align-items:center; }
-.vu-label { font-size:9px; color:#888; width:32px; }
-.vu-track { flex:1; height:4px; background:rgba(255,255,255,0.1); border-radius:2px; overflow:hidden; }
-.vu-fill { height:100%; width:0%; border-radius:2px; }
-.editor-wrap { position:relative; }
-.editor-highlight { position:absolute; top:0; left:0; right:0; bottom:0; margin:0; pointer-events:none; overflow:hidden; font-family:inherit; font-size:12px; line-height:1.5; padding:10px; border:1px solid transparent; border-radius:4px; white-space:pre; tab-size:2; background:transparent; }
-.editor-highlight code { font-family:inherit; }
-#sandbox-editor, #sandbox-tests { position:relative; z-index:1; background:rgba(0,0,0,0.35); color:transparent; caret-color:#e0e0e0; font-family:inherit; font-size:12px; line-height:1.5; border:1px solid rgba(255,255,255,0.15); border-radius:4px; padding:10px; resize:none; overflow-y:auto; white-space:pre; overflow-wrap:normal; overflow-x:auto; tab-size:2; width:100%; }
-#sandbox-editor { min-height:60px; max-height:50vh; }
-#sandbox-editor:focus { outline:none; border-color:rgba(126,200,227,0.4); }
-#sandbox-editor::selection { background:rgba(126,200,227,0.3); }
-#sandbox-tests-label { color:#7ec8e3; font-size:11px; margin-top:8px; display:none; }
-#sandbox-tests { min-height:40px; max-height:30vh; background:rgba(0,0,0,0.25); border-color:rgba(80,140,220,0.3); }
-#sandbox-tests:focus { outline:none; border-color:rgba(80,140,220,0.5); }
-#sandbox-tests::selection { background:rgba(80,140,220,0.3); }
-#sandbox-controls { display:flex; gap:8px; align-items:center; padding:4px 0; }
-#sandbox-run { background:rgba(80,180,80,0.3); border:1px solid rgba(80,180,80,0.5); color:#7ec8e3; font:inherit; font-size:12px; padding:4px 12px; border-radius:3px; cursor:pointer; }
-#sandbox-run:hover { background:rgba(80,180,80,0.5); }
-#sandbox-test { background:rgba(80,140,220,0.3); border:1px solid rgba(80,140,220,0.5); color:#7ec8e3; font:inherit; font-size:12px; padding:4px 12px; border-radius:3px; cursor:pointer; }
-#sandbox-test:hover { background:rgba(80,140,220,0.5); }
-#sandbox-lang { color:#888; font-size:11px; }
-#sandbox-output { background:rgba(0,0,0,0.5); padding:10px; border-radius:4px; font-size:12px; white-space:pre-wrap; max-height:400px; overflow-y:auto; margin-top:8px; }
-.sandbox-btn { position:absolute; bottom:4px; right:4px; background:rgba(80,180,80,0.2); border:1px solid rgba(80,180,80,0.4); color:#7ec8e3; font-size:11px; padding:1px 8px; border-radius:3px; cursor:pointer; }
-.sandbox-btn:hover { background:rgba(80,180,80,0.4); color:#fff; }
-.sandbox-ok { color:#50b050; } .sandbox-fail { color:#e05050; }
-#log-output { font-size:11px; white-space:pre-wrap; color:#ccc; max-height:100%; overflow-y:auto; }
-.log-error { color:#e05050; } .log-warn { color:#e8a735; } .log-info { color:#888; }
-` + o.chromaCS + `
-</style></head><body>
-<div id="tab-bar">
+
+func (o *OverlayRenderer) buildHTML() string {
+	return `<div id="tab-bar">
   <button id="tab-chat" class="active" onclick="switchTab('chat')">Chat</button>
   <button id="tab-transcript" onclick="switchTab('transcript')">Transcript</button>
+  <button id="tab-screenshots" onclick="switchTab('screenshots')">Screenshots</button>
   <button id="tab-sandbox" onclick="switchTab('sandbox')">Sandbox</button>
+  <button id="tab-context" onclick="switchTab('context')">Context</button>
+  <button id="tab-trace" onclick="switchTab('trace')">Trace</button>
   <button id="tab-log" onclick="switchTab('log')">Log</button>
 </div>
 <div id="chat-content" class="tab-content active"></div>
 <div id="transcript-content" class="tab-content"></div>
+<div id="screenshots-content" class="tab-content"><div id="screenshot-grid"></div></div>
 <div id="sandbox-content" class="tab-content">
   <div class="editor-wrap">
     <pre class="editor-highlight"><code id="sandbox-editor-hl"></code></pre>
@@ -797,7 +932,17 @@ body {
   </div>
   <pre id="sandbox-output"></pre>
 </div>
+<div id="context-content" class="tab-content">
+  <div id="ctx-active">
+    <div id="ctx-screenshots"></div>
+    <div id="ctx-transcript"></div>
+    <div id="ctx-files"></div>
+  </div>
+</div>
+<div id="trace-content" class="tab-content"></div>
 <div id="log-content" class="tab-content"><pre id="log-output"></pre></div>
+<button id="delete-traces-btn" style="display:none" onclick="_deleteTraces()">Delete selected</button>
+<div id="ss-lightbox" onclick="this.classList.remove('active')"><img></div>
 <div id="footer"><div id="context-info"></div><div id="footer-status"></div>
 <div id="vu-meters">
   <span class="vu-label">mic</span>
@@ -807,168 +952,7 @@ body {
 </div>
 <div id="footer-btns">
 ` + buildFooterButtons() + `<button id="btn-setup" onclick="_showSetupMenu(event)">Setup</button>
-</div></div>
-<script>
-window._ctxScreen=false;window._ctxAudio=0;window._ctxMic=0;window._ctxFS='';
-window._updateCtxDisplay=function(){
-  var parts=[];
-  if(_ctxScreen)parts.push('screen: \u2713');
-  if(_ctxAudio)parts.push('audio: '+_ctxAudio+' chars');
-  if(_ctxMic)parts.push('mic: '+_ctxMic+' chars');
-  if(_ctxFS)parts.push('file sys: '+_ctxFS);
-  document.getElementById('context-info').textContent=parts.join(' | ');
-};
-window._ctxMenu=null;
-window._setupMenu=null;
-window._showPopup=function(refName,closeFn){
-  var m=document.createElement('div');
-  m.className='ctx-popup';
-  document.getElementById('footer-btns').appendChild(m);
-  window[refName]=m;
-  setTimeout(function(){document.addEventListener('click',function h(){closeFn();document.removeEventListener('click',h);});},0);
-  return m;
-};
-window._closeCtx=function(){if(_ctxMenu){_ctxMenu.remove();_ctxMenu=null;}};
-window._closeSetup=function(){if(_setupMenu){_setupMenu.remove();_setupMenu=null;}};
-window._showCtxMenu=function(e){
-  e.stopPropagation();
-  if(_ctxMenu){_closeCtx();return;}
-  var m=_showPopup('_ctxMenu',_closeCtx);
-  m.innerHTML='<div onclick="_selectContext(\'dir\')">Directory</div><div onclick="_selectContext(\'file\')">File</div>';
-};
-window._showSetupMenu=function(e){
-  e.stopPropagation();
-  if(_setupMenu){_closeSetup();return;}
-  var m=_showPopup('_setupMenu',_closeSetup);
-  m.innerHTML='<div id="btn-soundcheck" onclick="_action(\'soundcheck\')">Sound Check</div><div onclick="_showMPXSub()">Mouse (MPX)</div>';
-};
-window._showMPXSub=function(){
-  _closeSetup();
-  _isMPXActive().then(function(active){
-    if(active){_teardownMPX();return;}
-    _listMice().then(function(raw){
-      var mice=JSON.parse(raw);
-      if(!mice||!mice.length)return;
-      var m=_showPopup('_setupMenu',_closeSetup);
-      for(var i=0;i<mice.length;i++){(function(mouse){
-        var d=document.createElement('div');
-        d.textContent=mouse.Name+' ('+mouse.ID+')';
-        d.onclick=function(){_setupMPX(mouse.ID);_closeSetup();};
-        m.appendChild(d);
-      })(mice[i]);}
-    });
-  });
-};
-window._autoSize=function(el){el.style.height='auto';el.style.height=el.scrollHeight+'px';};
-window._hlTimers={};
-window._syncHighlight=function(taId,hlId){
-  var ta=document.getElementById(taId);
-  var hl=document.getElementById(hlId);
-  if(!ta||!hl)return;
-  var lang=document.getElementById('sandbox-lang').textContent||'';
-  _highlight(ta.value,lang).then(function(html){hl.innerHTML=html;});
-};
-window._debouncedSync=function(taId,hlId){
-  clearTimeout(window._hlTimers[taId]);
-  window._hlTimers[taId]=setTimeout(function(){_syncHighlight(taId,hlId);},150);
-};
-window._bindEditor=function(taId,hlId){
-  var ta=document.getElementById(taId);
-  ta.addEventListener('input',function(){_autoSize(this);_debouncedSync(taId,hlId);});
-  ta.addEventListener('scroll',function(){var p=this.parentNode.querySelector('.editor-highlight');p.scrollTop=this.scrollTop;p.scrollLeft=this.scrollLeft;});
-};
-_bindEditor('sandbox-editor','sandbox-editor-hl');
-_bindEditor('sandbox-tests','sandbox-tests-hl');
-window._runCombined=function(){
-  var code=document.getElementById('sandbox-editor').value;
-  var tests=document.getElementById('sandbox-tests').value;
-  var lang=document.getElementById('sandbox-lang').textContent;
-  _runSandbox(code,tests,lang);
-};
-window._autoScroll=true;
-window._transcriptAutoScroll=true;
-window._setupAutoScroll=function(id,flag){
-  var el=document.getElementById(id);
-  el.addEventListener('wheel',function(){window[flag]=false;});
-  el.addEventListener('scroll',function(){
-    if(el.scrollTop+el.clientHeight>=el.scrollHeight-5)window[flag]=true;
-  });
-};
-_setupAutoScroll('chat-content','_autoScroll');
-_setupAutoScroll('transcript-content','_transcriptAutoScroll');
-window._logBadge=0;
-window._logIdx=-1;
-window._sandboxLangs={'python':1,'go':1,'javascript':1,'js':1,'typescript':1,'ts':1,'cpp':1,'c++':1,'rust':1,'java':1};
-window.switchTab=function(name){
-  var tabs=['chat','transcript','sandbox','log'];
-  for(var i=0;i<tabs.length;i++){
-    var btn=document.getElementById('tab-'+tabs[i]);
-    var div=document.getElementById(tabs[i]+'-content');
-    if(tabs[i]===name){btn.className='active';div.className='tab-content active';}
-    else{btn.className='';div.className='tab-content';}
-  }
-  if(name==='transcript'){
-    window._transcriptAutoScroll=true;
-    document.getElementById('transcript-content').scrollTop=document.getElementById('transcript-content').scrollHeight;
-  }
-  if(name==='log'){
-    window._logBadge=0;
-    var b=document.getElementById('tab-log').querySelector('.tab-badge');if(b)b.remove();
-    document.getElementById('log-output').scrollTop=document.getElementById('log-output').scrollHeight;
-  }
-};
-window._injectSandboxButtons=function(){
-  var wraps=document.querySelectorAll('#chat-content .highlight[data-lang]');
-  for(var i=0;i<wraps.length;i++){
-    var wrap=wraps[i];
-    var lang=wrap.getAttribute('data-lang');
-    if(!window._sandboxLangs[lang])continue;
-    if(wrap.querySelector('.sandbox-btn'))continue;
-    var pre=wrap.querySelector('pre');
-    if(!pre)continue;
-    var code=pre.querySelector('code')||pre;
-    wrap.style.position='relative';
-    var btn=document.createElement('button');
-    btn.className='sandbox-btn';
-    btn.textContent='\u25B6 Sandbox';
-    btn.onclick=(function(c,l){return function(){_sendToSandbox(c.textContent,l);};})(code,lang);
-    wrap.appendChild(btn);
-  }
-};
-(function vuPump(){
-  _pollVU().then(function(js){if(js)eval(js);});
-  requestAnimationFrame(vuPump);
-})();
-setInterval(function(){
-  _pollUpdates().then(function(js){if(js)eval(js);});
-},33);
-setInterval(function(){
-  _pollLog(window._logIdx).then(function(raw){
-    if(!raw)return;
-    var entries=JSON.parse(raw);
-    if(!entries||!entries.length)return;
-    var out=document.getElementById('log-output');
-    var logTab=document.getElementById('log-content');
-    var isActive=logTab.classList.contains('active');
-    for(var i=0;i<entries.length;i++){
-      var e=entries[i];
-      var ts=e.Time?e.Time.substring(11,19):'';
-      var cls='log-'+e.Level;
-      out.innerHTML+='<span class="'+cls+'">'+ts+' ['+e.Level+'] '+e.Message+'</span>\n';
-      window._logIdx=e.Index;
-    }
-    if(isActive){out.scrollTop=out.scrollHeight;return;}
-    var errs=0;for(var j=0;j<entries.length;j++){if(entries[j].Level==='error')errs++;}
-    if(!errs)return;
-    window._logBadge+=errs;
-    var btn=document.getElementById('tab-log');
-    var b=btn.querySelector('.tab-badge');
-    if(!b){b=document.createElement('span');b.className='tab-badge';btn.appendChild(b);}
-    b.textContent=window._logBadge;
-  });
-},500);
-</script>
-</body></html>`
+</div></div>`
 }
 
 func newMarkdownRenderer() goldmark.Markdown {

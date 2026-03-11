@@ -5,7 +5,51 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
+
+var CtxFileSelection = NewContextFileSelection()
+
+type ContextFileSelection struct {
+	mu       sync.Mutex
+	excluded map[string]bool
+}
+
+func NewContextFileSelection() *ContextFileSelection {
+	return &ContextFileSelection{excluded: make(map[string]bool)}
+}
+
+func (c *ContextFileSelection) SetExcluded(rel string, excluded bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if excluded {
+		c.excluded[rel] = true
+		return
+	}
+	delete(c.excluded, rel)
+}
+
+func (c *ContextFileSelection) IsExcluded(rel string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.excluded[rel]
+}
+
+func (c *ContextFileSelection) ExcludedSet() map[string]bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cp := make(map[string]bool, len(c.excluded))
+	for k, v := range c.excluded {
+		cp[k] = v
+	}
+	return cp
+}
+
+func (c *ContextFileSelection) Clear() {
+	c.mu.Lock()
+	c.excluded = make(map[string]bool)
+	c.mu.Unlock()
+}
 
 const (
 	contextMaxFiles   = 50
@@ -46,6 +90,38 @@ func readContextFile(path string, maxSize int64) (string, bool) {
 	return string(data), true
 }
 
+func listContextFiles(path string) []string {
+	if path == "" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	if !info.IsDir() {
+		return []string{filepath.Base(path)}
+	}
+	var files []string
+	filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() && strings.HasPrefix(d.Name(), ".") {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || strings.HasPrefix(d.Name(), ".") {
+			return nil
+		}
+		if len(files) >= contextMaxFiles {
+			return filepath.SkipAll
+		}
+		rel, _ := filepath.Rel(path, p)
+		files = append(files, rel)
+		return nil
+	})
+	return files
+}
+
 func readContextPath(path string) string {
 	if path == "" {
 		return ""
@@ -58,7 +134,7 @@ func readContextPath(path string) string {
 	if !info.IsDir() {
 		return readSingleFileContext(path)
 	}
-	return readDirContext(path)
+	return readDirContextFiltered(path, CtxFileSelection.ExcludedSet())
 }
 
 func readSingleFileContext(path string) string {
@@ -75,7 +151,7 @@ func readSingleFileContext(path string) string {
 	return buf.String()
 }
 
-func readDirContext(dir string) string {
+func readDirContextFiltered(dir string, excluded map[string]bool) string {
 	var buf strings.Builder
 	totalSize := 0
 	fileCount := 0
@@ -94,6 +170,10 @@ func readDirContext(dir string) string {
 			fmt.Fprintf(os.Stderr, "context: file limit reached (%d files)\n", contextMaxFiles)
 			return filepath.SkipAll
 		}
+		rel, _ := filepath.Rel(dir, path)
+		if excluded[rel] {
+			return nil
+		}
 		content, ok := readContextFile(path, contextMaxPerFile)
 		if !ok {
 			return nil
@@ -102,7 +182,6 @@ func readDirContext(dir string) string {
 			fmt.Fprintf(os.Stderr, "context: total size limit reached (%d bytes)\n", contextMaxTotal)
 			return filepath.SkipAll
 		}
-		rel, _ := filepath.Rel(dir, path)
 		buf.WriteString("--- File: ")
 		buf.WriteString(rel)
 		buf.WriteString(" ---\n")
