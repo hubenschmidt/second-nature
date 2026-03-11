@@ -164,6 +164,13 @@ func (r *Recorder) PeekTailRMS(n int) float64 {
 	return rms(r.samples[len(r.samples)-n:])
 }
 
+// TailHasVoice returns true if VAD detects speech in the last n samples.
+func (r *Recorder) TailHasVoice(n int) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return tailHasVoice(r.samples, n)
+}
+
 // SampleCount returns the current number of buffered samples.
 func (r *Recorder) SampleCount() int {
 	r.mu.Lock()

@@ -1014,7 +1014,7 @@ func handleMicStart(recorder *Recorder, renderer Renderer, ac *AudioCapture, whi
 	}
 
 	stopCh := make(chan struct{})
-	go runChunkLoop(micMinChunkDuration, micMaxChunkDuration, micSilenceWindow, silenceThreshold, micPollInterval, recorder, stopCh, func() {
+	go runChunkLoop(micMinChunkDuration, micMaxChunkDuration, micVadTailSamples, micPollInterval, recorder, stopCh, func() {
 		micTranscribeChunk(recorder, renderer, ac, whisperURL)
 	})
 	return stopCh
@@ -1024,12 +1024,11 @@ func transcribeAndAppend(samples []int16, renderer Renderer, ac *AudioCapture, w
 	if len(samples) == 0 {
 		return false
 	}
-	chunkRMS := rms(samples)
-	if !hasSpeech(samples, silenceWindow, silenceThreshold) {
-		fmt.Printf("[audio-capture] dropped chunk: %d samples, rms=%.0f (no speech window above %.0f)\n", len(samples), chunkRMS, silenceThreshold)
+	if !hasVoice(samples) {
+		fmt.Printf("[audio-capture] dropped silent chunk: %d samples (VAD: no speech)\n", len(samples))
 		return false
 	}
-	fmt.Printf("[audio-capture] sending chunk: %d samples, rms=%.0f\n", len(samples), chunkRMS)
+	fmt.Printf("[audio-capture] sending chunk: %d samples\n", len(samples))
 	wavData := EncodeWAV(samples, asrSampleRate)
 	text, err := Transcribe(wavData, whisperURL)
 	if err != nil {

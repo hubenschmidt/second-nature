@@ -65,11 +65,11 @@ graph TD
 |---|---|
 | `main.go` | CLI setup, config persistence, action dispatch loop |
 | `hotkey.go` | Global hotkey listener via evdev (arrow key combos) |
-| `capture.go` | Screenshot capture (X11 → JPEG) |
+| `screen_capture.go` | Screenshot capture (X11 → JPEG) |
 | `asr.go` | Audio recording (PulseAudio/parec), WAV encoding, Whisper HTTP client |
-| `continuous.go` | Continuous audio capture — chunking, silence detection, dedup, transcript summarization |
+| `audio_capture.go` | Continuous audio capture — chunking, silence detection, dedup, transcript summarization |
 | `provider.go` | `Provider` interface + solve prompt builder |
-| `solve.go` | `AnthropicProvider` — Claude Messages API with streaming |
+| `solve_anthropic.go` | `AnthropicProvider` — Claude Messages API with streaming |
 | `solve_openai.go` | `OpenAIProvider` — OpenAI Responses API with streaming |
 | `renderer.go` | `Renderer` interface, `TerminalRenderer` (glamour), `MultiRenderer` |
 | `overlay.go` | `OverlayRenderer` — GTK+WebKit transparent always-on-top webview |

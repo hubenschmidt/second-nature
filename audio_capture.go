@@ -14,14 +14,13 @@ import (
 type SummarizeFn func(text string) (string, error)
 
 const (
-	silenceThreshold   = 500.0
 	minChunkDuration    = 12 * time.Second
 	maxChunkDuration    = 25 * time.Second
 	micMinChunkDuration = 3 * time.Second
 	micMaxChunkDuration = 15 * time.Second
 	pollInterval        = 200 * time.Millisecond
-	silenceWindow       = 32000 // 2s at 16kHz — wider to avoid fragmenting on natural pauses
-	micSilenceWindow    = 12000 // 0.75s at 16kHz — tighter for low-latency mic transcription
+	vadTailSamples      = 32000 // 2s at 16kHz — silence window for chunk splitting
+	micVadTailSamples   = 4800  // 0.3s at 16kHz — short enough to catch single-word responses
 	micPollInterval     = 100 * time.Millisecond
 	dedupWindow        = 2 * time.Second
 	summarizeThreshold = 3000  // chars of raw text before triggering summarization
@@ -219,12 +218,11 @@ func (ac *AudioCapture) TranscribeNow() {
 	if len(samples) == 0 {
 		return
 	}
-	chunkRMS := rms(samples)
-	if !hasSpeech(samples, silenceWindow, silenceThreshold) {
-		fmt.Printf("[audio-capture] dropped chunk: %d samples, rms=%.0f (no speech window above %.0f)\n", len(samples), chunkRMS, silenceThreshold)
+	if !hasVoice(samples) {
+		fmt.Printf("[audio-capture] dropped chunk: %d samples (VAD: no speech)\n", len(samples))
 		return
 	}
-	fmt.Printf("[audio-capture] sending chunk: %d samples, rms=%.0f\n", len(samples), chunkRMS)
+	fmt.Printf("[audio-capture] sending chunk: %d samples\n", len(samples))
 
 	wavData := EncodeWAV(samples, asrSampleRate)
 	text, err := Transcribe(wavData, ac.whisperURL)
@@ -465,12 +463,12 @@ func (ac *AudioCapture) isMicDuplicate(text string) bool {
 // RunChunkLoop polls for silence-based chunk boundaries while active.
 // Must be called in a goroutine.
 func (ac *AudioCapture) RunChunkLoop() {
-	runChunkLoop(minChunkDuration, maxChunkDuration, silenceWindow, silenceThreshold, pollInterval, ac.recorder, ac.stopCh, ac.TranscribeNow)
+	runChunkLoop(minChunkDuration, maxChunkDuration, vadTailSamples, pollInterval, ac.recorder, ac.stopCh, ac.TranscribeNow)
 }
 
 // runChunkLoop is a generic chunk-boundary poller parameterized by timing,
 // recorder, stop channel, and a transcribe callback.
-func runChunkLoop(minDur, maxDur time.Duration, silenceWin int, silenceThresh float64, poll time.Duration, recorder *Recorder, stopCh <-chan struct{}, transcribe func()) {
+func runChunkLoop(minDur, maxDur time.Duration, tailSamples int, poll time.Duration, recorder *Recorder, stopCh <-chan struct{}, transcribe func()) {
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 
@@ -485,7 +483,7 @@ func runChunkLoop(minDur, maxDur time.Duration, silenceWin int, silenceThresh fl
 
 		elapsed := time.Since(chunkStart)
 		forced := elapsed >= maxDur
-		silent := elapsed >= minDur && recorder.PeekTailRMS(silenceWin) < silenceThresh
+		silent := elapsed >= minDur && !recorder.TailHasVoice(tailSamples)
 
 		if forced || silent {
 			transcribe()
@@ -515,35 +513,3 @@ func rms(samples []int16) float64 {
 	return math.Sqrt(sum / float64(len(samples)))
 }
 
-// hasSpeech returns true if any sliding window of windowSize samples
-// exceeds threshold RMS. Unlike whole-chunk rms(), this detects speech
-// even when surrounded by silence.
-func hasSpeech(samples []int16, windowSize int, threshold float64) bool {
-	if len(samples) == 0 {
-		return false
-	}
-	if windowSize > len(samples) {
-		return rms(samples) >= threshold
-	}
-
-	// Compute initial window sum-of-squares
-	var sumSq float64
-	for i := 0; i < windowSize; i++ {
-		v := float64(samples[i])
-		sumSq += v * v
-	}
-	if math.Sqrt(sumSq/float64(windowSize)) >= threshold {
-		return true
-	}
-
-	// Slide window, updating sum-of-squares incrementally
-	for i := windowSize; i < len(samples); i++ {
-		add := float64(samples[i])
-		drop := float64(samples[i-windowSize])
-		sumSq += add*add - drop*drop
-		if math.Sqrt(sumSq/float64(windowSize)) >= threshold {
-			return true
-		}
-	}
-	return false
-}
