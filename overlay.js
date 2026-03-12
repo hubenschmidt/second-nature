@@ -231,8 +231,8 @@ window._setupAutoScroll = function (id, flag) {
       window[flag] = true;
   });
 };
-_setupAutoScroll("chat-content", "_autoScroll");
-_setupAutoScroll("transcript-content", "_transcriptAutoScroll");
+_setupAutoScroll("content-area", "_autoScroll");
+window._transcriptAutoScroll = window._autoScroll;
 window._logBadge = 0;
 window._logIdx = -1;
 window._sandboxLangs = {
@@ -269,9 +269,9 @@ window.switchTab = function (name) {
     }
   }
   if (name === "transcript") {
-    window._transcriptAutoScroll = true;
-    document.getElementById("transcript-content").scrollTop =
-      document.getElementById("transcript-content").scrollHeight;
+    window._autoScroll = true;
+    document.getElementById("content-area").scrollTop =
+      document.getElementById("content-area").scrollHeight;
   }
   if (name === "context") {
     _refreshContext();

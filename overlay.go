@@ -588,9 +588,9 @@ func (o *OverlayRenderer) wrapResponse() string {
 
 func (o *OverlayRenderer) StreamDone() {
 	wrapped := o.wrapResponse()
-	js := "var c=document.getElementById('chat-content'),st=c.scrollTop;" +
+	js := "var c=document.getElementById('chat-content'),ca=document.getElementById('content-area'),st=ca.scrollTop;" +
 		"c.innerHTML=" + jsString(wrapped) + ";_injectSandboxButtons();" +
-		"if(!window._autoScroll)c.scrollTop=st;"
+		"if(!window._autoScroll)ca.scrollTop=st;"
 	o.eval(js)
 }
 
@@ -599,7 +599,7 @@ func (o *OverlayRenderer) AppendStreamStart() {
 	js := `window._autoScroll=true;var c=document.getElementById('chat-content');` +
 		`c.innerHTML+='<hr><h3 style="color:#7ec8e3">▼ follow-up</h3><pre id="stream"></pre>';` +
 		`document.getElementById('footer-status').textContent='';` +
-		`c.scrollTop=c.scrollHeight;`
+		`document.getElementById('content-area').scrollTop=document.getElementById('content-area').scrollHeight;`
 	o.eval(js)
 }
 
@@ -608,9 +608,9 @@ func (o *OverlayRenderer) AppendStreamDelta(delta string) { o.streamDelta(delta)
 func (o *OverlayRenderer) AppendStreamDone() {
 	wrapped := o.wrapResponse()
 	js := `var s=document.getElementById('stream');` +
-		`if(s){var c=document.getElementById('chat-content'),st=c.scrollTop;` +
+		`if(s){var ca=document.getElementById('content-area'),st=ca.scrollTop;` +
 		`var d=document.createElement('div');d.innerHTML=` + jsString(wrapped) + `;s.replaceWith(d);` +
-		`if(window._autoScroll)d.scrollIntoView(false);else c.scrollTop=st;}_injectSandboxButtons();`
+		`if(window._autoScroll)d.scrollIntoView(false);else ca.scrollTop=st;}_injectSandboxButtons();`
 	o.eval(js)
 }
 
@@ -628,7 +628,7 @@ func (o *OverlayRenderer) AppendTranscriptChunk(source, text string, id int) {
 	}
 	js := `var t=document.getElementById('transcript-content');` +
 		`t.innerHTML+=` + jsString(chunk) + `;` +
-		`if(window._transcriptAutoScroll){t.scrollTop=t.scrollHeight;}` +
+		`if(window._autoScroll){var ca=document.getElementById('content-area');ca.scrollTop=ca.scrollHeight;}` +
 		`window.` + counterKey + `=(window.` + counterKey + `||0)+` + fmt.Sprintf("%d", len(text)) + `;_updateCtxDisplay();`
 	o.eval(js)
 }
@@ -912,6 +912,7 @@ func (o *OverlayRenderer) buildHTML() string {
   <button id="tab-trace" onclick="switchTab('trace')">Trace</button>
   <button id="tab-log" onclick="switchTab('log')">Log</button>
 </div>
+<div id="content-area">
 <div id="chat-content" class="tab-content active"></div>
 <div id="transcript-content" class="tab-content"></div>
 <div id="screenshots-content" class="tab-content"><div id="screenshot-grid"></div></div>
@@ -943,6 +944,7 @@ func (o *OverlayRenderer) buildHTML() string {
 <div id="log-content" class="tab-content"><pre id="log-output"></pre></div>
 <button id="delete-traces-btn" style="display:none" onclick="_deleteTraces()">Delete selected</button>
 <div id="ss-lightbox" onclick="this.classList.remove('active')"><img></div>
+</div>
 <div id="footer"><div id="context-info"></div><div id="footer-status"></div>
 <div id="vu-meters">
   <span class="vu-label">mic</span>
