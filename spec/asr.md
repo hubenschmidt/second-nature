@@ -2,19 +2,19 @@
 
 ## 1. Problem Statement
 
-sn-monitor captures a screen, sends the image to an LLM, and renders the solution. The interaction is currently one-shot per capture: Left+Right hotkey triggers capture → solve → render. There is no way to ask follow-up questions without re-capturing and relying on conversation history to infer context.
+second-nature captures a screen, sends the image to an LLM, and renders the solution. The interaction is currently one-shot per capture: Left+Right hotkey triggers capture → solve → render. There is no way to ask follow-up questions without re-capturing and relying on conversation history to infer context.
 
 Voice follow-ups solve this:
 
 - **"Explain further"** — user presses a hotkey, speaks a clarification, and the LLM responds using the existing conversation context (no new screenshot).
 - **"Solve with new capture"** — existing Left+Right flow, unchanged.
-- **Faster iteration** — voice is faster than typing, and sn-monitor has no text input surface (overlay is read-only, terminal is occupied by the event loop).
+- **Faster iteration** — voice is faster than typing, and second-nature has no text input surface (overlay is read-only, terminal is occupied by the event loop).
 
 ## 2. Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                      sn-monitor                          │
+│                      second-nature                          │
 │                                                          │
 │  ┌──────────┐   ┌───────────┐   ┌────────────────────┐  │
 │  │ hotkey.go │──▶│  main.go  │──▶│ Provider.Solve()   │  │
@@ -144,7 +144,7 @@ type Provider interface {
 
 ## 6. ASR Integration — whisper-server
 
-sn-monitor already depends on a running whisper-server instance (same one used in `asr-llm-tts-poc`).
+second-nature already depends on a running whisper-server instance (same one used in `asr-llm-tts-poc`).
 
 ### Transcribe Request
 
@@ -273,7 +273,7 @@ Existing build command unchanged — PortAudio links via CGo automatically. The 
 | 2 | `go get github.com/gordonklaus/portaudio` | Module added to go.mod |
 | 3 | Build: `PKG_CONFIG_PATH=./pkgconfig:$PKG_CONFIG_PATH go build` | Compiles without errors |
 | 4 | Start whisper-server on `:8178` | Server healthy |
-| 5 | Run sn-monitor, press Left+Right | Existing capture flow works (regression check) |
+| 5 | Run second-nature, press Left+Right | Existing capture flow works (regression check) |
 | 6 | Press Up+Down (hold), speak, release | Status shows "recording..." → "thinking..." → streamed response appears |
 | 7 | Press Left+Up | "Explain further" follow-up streams without recording |
 | 8 | Press Up+Down with no speech | Status shows "no speech detected", no API call |

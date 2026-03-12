@@ -1,10 +1,10 @@
 export PKG_CONFIG_PATH := $(CURDIR)/pkgconfig:$(PKG_CONFIG_PATH)
 
 build:
-	go build -o sn-monitor .
+	go build -o second-nature .
 
 run: build
-	@./sn-monitor
+	@./second-nature
 
 clean:
-	rm -f sn-monitor
+	rm -f second-nature

@@ -168,7 +168,7 @@ func NewOverlayRenderer() *OverlayRenderer {
 	gtkWin := C.create_rgba_window()
 	C.set_no_focus(gtkWin)
 	w := webview.NewWindow(false, unsafe.Pointer(gtkWin))
-	w.SetTitle("sn-monitor")
+	w.SetTitle("second-nature")
 	w.SetSize(700, 900, webview.HintNone)
 
 	// Now the webkit child exists — make its background transparent

@@ -2,7 +2,7 @@
 
 ## 1. Problem Statement
 
-sn-monitor's voice follow-up (spec/asr.md) captures mic-only audio for push-to-talk follow-up questions. For meeting transcription (Google Meet, Zoom, Teams), we need to capture:
+second-nature's voice follow-up (spec/asr.md) captures mic-only audio for push-to-talk follow-up questions. For meeting transcription (Google Meet, Zoom, Teams), we need to capture:
 
 - **System audio** — what other participants are saying (routed through PulseAudio/PipeWire sinks)
 - **Mic audio** — what the local user is saying
@@ -14,7 +14,7 @@ Additionally, push-to-talk is insufficient for meeting transcription. A **contin
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
-│                        sn-monitor                             │
+│                        second-nature                             │
 │                                                               │
 │  ┌────────────┐    ┌──────────────────────────┐               │
 │  │ devices.go │───▶│        Recorder           │              │

@@ -1,4 +1,4 @@
-# sn-monitor
+# second-nature
 
 A multimodal AI assistant for Linux that combines screen capture, microphone/system audio transcription, and source file context. Trigger actions via global hotkeys (arrow key combos on evdev), and view streamed AI responses in the terminal or a transparent always-on-top GTK overlay with syntax-highlighted markdown.
 

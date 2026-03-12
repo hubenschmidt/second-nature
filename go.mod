@@ -1,4 +1,4 @@
-module sn-monitor
+module second-nature
 
 go 1.23.4
 
