@@ -112,6 +112,7 @@ func (ac *AudioCapture) start() {
 func (ac *AudioCapture) stop() {
 	ac.active.Store(false)
 	close(ac.stopCh)
+	ac.TranscribeNow()
 	ac.recorder.Stop()
 
 	ac.mu.Lock()
