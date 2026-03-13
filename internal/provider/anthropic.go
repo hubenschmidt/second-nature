@@ -1,4 +1,4 @@
-package main
+package provider
 
 import (
 	"context"
@@ -8,6 +8,8 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
+
+	appctx "second-nature/internal/context"
 )
 
 type AnthropicProvider struct {
@@ -64,7 +66,7 @@ func (p *AnthropicProvider) Solve(images [][]byte, transcript string, onDelta fu
 	for _, img := range images {
 		blocks = append(blocks, anthropic.NewImageBlockBase64("image/jpeg", base64.StdEncoding.EncodeToString(img)))
 	}
-	blocks = append(blocks, anthropic.NewTextBlock(buildSolvePrompt(p.lang, readContextPath(p.contextDir), transcript, len(images))))
+	blocks = append(blocks, anthropic.NewTextBlock(BuildSolvePrompt(p.lang, appctx.ReadContextPath(p.contextDir), transcript, len(images))))
 
 	p.history = append(p.history, anthropic.NewUserMessage(blocks...))
 
@@ -114,7 +116,7 @@ func (p *AnthropicProvider) RemoveHistoryPair(userIndex int) {
 }
 
 func (p *AnthropicProvider) FollowUp(text string, onDelta func(string)) (string, error) {
-	msg := readContextPath(p.contextDir) + text
+	msg := appctx.ReadContextPath(p.contextDir) + text
 	p.history = append(p.history, anthropic.NewUserMessage(
 		anthropic.NewTextBlock(msg),
 	))

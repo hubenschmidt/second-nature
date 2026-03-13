@@ -1,4 +1,4 @@
-package main
+package provider
 
 import (
 	"context"
@@ -11,6 +11,8 @@ import (
 	"github.com/openai/openai-go/responses"
 	"github.com/openai/openai-go/shared"
 	"github.com/openai/openai-go/shared/constant"
+
+	appctx "second-nature/internal/context"
 )
 
 type OpenAIProvider struct {
@@ -117,7 +119,7 @@ func (p *OpenAIProvider) sendHistory(maxTokens int64, onDelta func(string)) (str
 
 func (p *OpenAIProvider) Solve(images [][]byte, transcript string, onDelta func(string)) (string, error) {
 	contentList := responses.ResponseInputMessageContentListParam{
-		responses.ResponseInputContentParamOfInputText(buildSolvePrompt(p.lang, readContextPath(p.contextDir), transcript, len(images))),
+		responses.ResponseInputContentParamOfInputText(BuildSolvePrompt(p.lang, appctx.ReadContextPath(p.contextDir), transcript, len(images))),
 	}
 	for _, img := range images {
 		dataURL := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(img)
@@ -173,7 +175,7 @@ func (p *OpenAIProvider) Summarize(text string) (string, error) {
 }
 
 func (p *OpenAIProvider) FollowUp(text string, onDelta func(string)) (string, error) {
-	msg := readContextPath(p.contextDir) + text
+	msg := appctx.ReadContextPath(p.contextDir) + text
 	contentList := responses.ResponseInputMessageContentListParam{
 		responses.ResponseInputContentParamOfInputText(msg),
 	}

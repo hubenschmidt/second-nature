@@ -1,43 +1,18 @@
-package main
+package render
 
 import (
 	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/glamour"
+
+	"second-nature/internal/model"
 )
 
-type Renderer interface {
-	Render(markdown string) error
-	SetStatus(status string)
-	StreamStart()
-	StreamDelta(delta string)
-	StreamDone()
-	AppendStreamStart()
-	AppendStreamDelta(delta string)
-	AppendStreamDone()
-	AppendTranscriptChunk(source, text string, id int)
-	ClearTranscriptCheckboxes()
-	SetMicRecording(recording bool)
-	SetAudioRecording(recording bool)
-	SetSoundCheck(active bool)
-	UpdateVU(micLevel, audioLevel float64)
-	AppendScreenshot(id int, data []byte)
-	RemoveScreenshot(id int)
-	ClearScreenshotCheckboxes()
-	SetScreenCount(count int)
-	SetCurrentTraceID(id int)
-	AddObserveTrace(trace Trace)
-	RemoveObserveTrace(traceID int)
-	ClearContextData()
-	Clear()
-	Close()
-}
-
-func hotkeyFooter() string {
-	parts := make([]string, len(keyOrder))
-	for i, a := range keyOrder {
-		parts[i] = keyLabels[a]
+func HotkeyFooter() string {
+	parts := make([]string, len(model.KeyOrder))
+	for i, a := range model.KeyOrder {
+		parts[i] = model.KeyLabels[a]
 	}
 	return "\033[2m " + strings.Join(parts, " · ") + " \033[0m"
 }
@@ -70,7 +45,7 @@ func (t *TerminalRenderer) printFooter() {
 	if t.status != "" {
 		fmt.Printf("\033[33m %s \033[0m\n", t.status)
 	}
-	fmt.Println(hotkeyFooter())
+	fmt.Println(HotkeyFooter())
 }
 
 func (t *TerminalRenderer) Render(markdown string) error {
@@ -138,7 +113,7 @@ func (t *TerminalRenderer) SetScreenCount(count int) {}
 
 func (t *TerminalRenderer) SetCurrentTraceID(id int) {}
 
-func (t *TerminalRenderer) AddObserveTrace(trace Trace) {}
+func (t *TerminalRenderer) AddObserveTrace(trace model.Trace) {}
 
 func (t *TerminalRenderer) RemoveObserveTrace(traceID int) {}
 
@@ -152,150 +127,150 @@ func (t *TerminalRenderer) Clear() {
 func (t *TerminalRenderer) Close() {}
 
 type MultiRenderer struct {
-	renderers []Renderer
+	Renderers []model.Renderer
 }
 
 func (m *MultiRenderer) Render(markdown string) error {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.Render(markdown)
 	}
 	return nil
 }
 
 func (m *MultiRenderer) SetStatus(status string) {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.SetStatus(status)
 	}
 }
 
 func (m *MultiRenderer) StreamStart() {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.StreamStart()
 	}
 }
 
 func (m *MultiRenderer) StreamDelta(delta string) {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.StreamDelta(delta)
 	}
 }
 
 func (m *MultiRenderer) StreamDone() {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.StreamDone()
 	}
 }
 
 func (m *MultiRenderer) AppendStreamStart() {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.AppendStreamStart()
 	}
 }
 
 func (m *MultiRenderer) AppendStreamDelta(delta string) {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.AppendStreamDelta(delta)
 	}
 }
 
 func (m *MultiRenderer) AppendStreamDone() {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.AppendStreamDone()
 	}
 }
 
 func (m *MultiRenderer) AppendTranscriptChunk(source, text string, id int) {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.AppendTranscriptChunk(source, text, id)
 	}
 }
 
 func (m *MultiRenderer) ClearTranscriptCheckboxes() {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.ClearTranscriptCheckboxes()
 	}
 }
 
 func (m *MultiRenderer) SetMicRecording(recording bool) {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.SetMicRecording(recording)
 	}
 }
 
 func (m *MultiRenderer) SetAudioRecording(recording bool) {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.SetAudioRecording(recording)
 	}
 }
 
 func (m *MultiRenderer) SetSoundCheck(active bool) {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.SetSoundCheck(active)
 	}
 }
 
 func (m *MultiRenderer) UpdateVU(micLevel, audioLevel float64) {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.UpdateVU(micLevel, audioLevel)
 	}
 }
 
 func (m *MultiRenderer) AppendScreenshot(id int, data []byte) {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.AppendScreenshot(id, data)
 	}
 }
 
 func (m *MultiRenderer) RemoveScreenshot(id int) {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.RemoveScreenshot(id)
 	}
 }
 
 func (m *MultiRenderer) ClearScreenshotCheckboxes() {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.ClearScreenshotCheckboxes()
 	}
 }
 
 func (m *MultiRenderer) SetScreenCount(count int) {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.SetScreenCount(count)
 	}
 }
 
 func (m *MultiRenderer) SetCurrentTraceID(id int) {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.SetCurrentTraceID(id)
 	}
 }
 
-func (m *MultiRenderer) AddObserveTrace(trace Trace) {
-	for _, r := range m.renderers {
+func (m *MultiRenderer) AddObserveTrace(trace model.Trace) {
+	for _, r := range m.Renderers {
 		r.AddObserveTrace(trace)
 	}
 }
 
 func (m *MultiRenderer) RemoveObserveTrace(traceID int) {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.RemoveObserveTrace(traceID)
 	}
 }
 
 func (m *MultiRenderer) ClearContextData() {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.ClearContextData()
 	}
 }
 
 func (m *MultiRenderer) Clear() {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.Clear()
 	}
 }
 
 func (m *MultiRenderer) Close() {
-	for _, r := range m.renderers {
+	for _, r := range m.Renderers {
 		r.Close()
 	}
 }

@@ -1,16 +1,13 @@
-package main
+package system
 
 import (
 	"fmt"
 	"os/exec"
 	"regexp"
 	"strings"
-)
 
-type MouseInfo struct {
-	ID   string `json:"ID"`
-	Name string `json:"Name"`
-}
+	"second-nature/internal/model"
+)
 
 var mouseIDRe = regexp.MustCompile(`id=(\d+)`)
 
@@ -19,12 +16,12 @@ var excludeDevices = []string{
 	"stylus", "eraser", "pad", "consumer", "power", "secondary",
 }
 
-func listMice() []MouseInfo {
+func ListMice() []model.MouseInfo {
 	out, err := exec.Command("xinput", "list", "--short").Output()
 	if err != nil {
 		return nil
 	}
-	var mice []MouseInfo
+	var mice []model.MouseInfo
 	for _, line := range strings.Split(string(out), "\n") {
 		m := parseMouse(line)
 		if m != nil {
@@ -34,7 +31,7 @@ func listMice() []MouseInfo {
 	return mice
 }
 
-func parseMouse(line string) *MouseInfo {
+func parseMouse(line string) *model.MouseInfo {
 	if !strings.Contains(line, "slave  pointer") {
 		return nil
 	}
@@ -50,7 +47,7 @@ func parseMouse(line string) *MouseInfo {
 		return nil
 	}
 	name := strings.TrimLeft(line[:nameEnd], "⎡⎜⎣↳ \t")
-	return &MouseInfo{ID: m[1], Name: strings.TrimSpace(name)}
+	return &model.MouseInfo{ID: m[1], Name: strings.TrimSpace(name)}
 }
 
 func isExcludedDevice(line string) bool {
@@ -63,7 +60,7 @@ func isExcludedDevice(line string) bool {
 	return false
 }
 
-func isMPXActive() bool {
+func IsMPXActive() bool {
 	out, err := exec.Command("xinput", "list", "--name-only").Output()
 	if err != nil {
 		return false
@@ -71,8 +68,8 @@ func isMPXActive() bool {
 	return strings.Contains(string(out), "Secondary pointer")
 }
 
-func setupMPX(deviceID string) error {
-	teardownMPX()
+func SetupMPX(deviceID string) error {
+	TeardownMPX()
 	if err := exec.Command("xinput", "create-master", "Secondary").Run(); err != nil {
 		return fmt.Errorf("create-master: %w", err)
 	}
@@ -82,8 +79,8 @@ func setupMPX(deviceID string) error {
 	return nil
 }
 
-func teardownMPX() {
-	if !isMPXActive() {
+func TeardownMPX() {
+	if !IsMPXActive() {
 		return
 	}
 	exec.Command("xinput", "remove-master", "Secondary pointer", "AttachToMaster", "Virtual core pointer").Run()

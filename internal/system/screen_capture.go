@@ -1,4 +1,4 @@
-package main
+package system
 
 import (
 	"bytes"
@@ -8,7 +8,7 @@ import (
 	"github.com/kbinani/screenshot"
 )
 
-func captureMonitor(index int) ([]byte, error) {
+func CaptureMonitor(index int) ([]byte, error) {
 	n := screenshot.NumActiveDisplays()
 	if index >= n {
 		return nil, fmt.Errorf("monitor %d not available (only %d displays)", index, n)

@@ -1,4 +1,4 @@
-package main
+package system
 
 import (
 	"fmt"
@@ -7,7 +7,7 @@ import (
 	"github.com/jezek/xgb/xproto"
 )
 
-func setAlwaysOnTop(xid uint32) error {
+func SetAlwaysOnTop(xid uint32) error {
 	conn, err := xgb.NewConn()
 	if err != nil {
 		return fmt.Errorf("x11 connect: %w", err)
@@ -43,7 +43,7 @@ func setAlwaysOnTop(xid uint32) error {
 	return xproto.SendEventChecked(conn, false, root, mask, string(ev.Bytes())).Check()
 }
 
-func setFullscreen(xid uint32) error {
+func SetFullscreen(xid uint32) error {
 	conn, err := xgb.NewConn()
 	if err != nil {
 		return fmt.Errorf("x11 connect: %w", err)

@@ -1,4 +1,4 @@
-package main
+package audio
 
 import (
 	"bytes"
@@ -20,13 +20,13 @@ func EncodeWAV(samples []int16, sampleRate int) []byte {
 
 	// fmt sub-chunk
 	buf.WriteString("fmt ")
-	binary.Write(&buf, binary.LittleEndian, int32(16))          // sub-chunk size
-	binary.Write(&buf, binary.LittleEndian, int16(1))           // PCM format
-	binary.Write(&buf, binary.LittleEndian, int16(1))           // mono
-	binary.Write(&buf, binary.LittleEndian, int32(sampleRate))  // sample rate
+	binary.Write(&buf, binary.LittleEndian, int32(16))           // sub-chunk size
+	binary.Write(&buf, binary.LittleEndian, int16(1))            // PCM format
+	binary.Write(&buf, binary.LittleEndian, int16(1))            // mono
+	binary.Write(&buf, binary.LittleEndian, int32(sampleRate))   // sample rate
 	binary.Write(&buf, binary.LittleEndian, int32(sampleRate*2)) // byte rate
-	binary.Write(&buf, binary.LittleEndian, int16(2))           // block align
-	binary.Write(&buf, binary.LittleEndian, int16(16))          // bits per sample
+	binary.Write(&buf, binary.LittleEndian, int16(2))            // block align
+	binary.Write(&buf, binary.LittleEndian, int16(16))           // bits per sample
 
 	// data sub-chunk
 	buf.WriteString("data")

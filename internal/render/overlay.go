@@ -1,4 +1,4 @@
-package main
+package render
 
 /*
 #cgo linux pkg-config: gtk+-3.0 gdk-x11-3.0 webkit2gtk-4.1
@@ -125,6 +125,13 @@ import (
 	"github.com/yuin/goldmark"
 	highlighting "github.com/yuin/goldmark-highlighting/v2"
 	"github.com/yuin/goldmark/util"
+
+	"second-nature/internal/applog"
+	"second-nature/internal/audio"
+	appctx "second-nature/internal/context"
+	"second-nature/internal/model"
+	"second-nature/internal/sandbox"
+	"second-nature/internal/system"
 )
 
 //go:embed overlay.css
@@ -133,7 +140,7 @@ var overlayCSS string
 //go:embed overlay.js
 var overlayJS string
 
-var clearOnProcess atomic.Bool
+var ClearOnProcess atomic.Bool
 
 type OverlayRenderer struct {
 	w         webview.WebView
@@ -145,14 +152,14 @@ type OverlayRenderer struct {
 	pendingJS strings.Builder
 	closed    atomic.Bool
 	currentTraceID     int
-	onAction           func(HotkeyAction)
+	onAction           func(model.HotkeyAction)
 	onToggleChunk      func(int, bool)
 	onToggleScreenshot func(int, bool)
 	onRemoveScreenshot func(int)
 	onRemoveTraces     func([]int)
-	appState           *AppState
-	ac                 *AudioCapture
-	provider           Provider
+	appState           *model.AppState
+	ac                 *audio.AudioCapture
+	provider           model.Provider
 	vuJS   atomic.Pointer[string]
 	fsGeom atomic.Pointer[[4]int]
 	isFS       atomic.Bool
@@ -186,9 +193,8 @@ func NewOverlayRenderer() *OverlayRenderer {
 	}
 
 	// Bind action handler for clickable overlay buttons.
-	// Build reverse map from actionNames (name→action).
-	nameToAction := make(map[string]HotkeyAction, len(actionNames))
-	for a, n := range actionNames {
+	nameToAction := make(map[string]model.HotkeyAction, len(model.ActionNames))
+	for a, n := range model.ActionNames {
 		nameToAction[n] = a
 	}
 	w.Bind("_action", func(name string) {
@@ -251,19 +257,19 @@ func NewOverlayRenderer() *OverlayRenderer {
 	})
 
 	w.Bind("_listMice", func() string {
-		mice := listMice()
+		mice := system.ListMice()
 		b, _ := json.Marshal(mice)
 		return string(b)
 	})
 
 	w.Bind("_isMPXActive", func() bool {
-		return isMPXActive()
+		return system.IsMPXActive()
 	})
 
 	w.Bind("_setupMPX", func(deviceID string) {
 		go func() {
-			if err := setupMPX(deviceID); err != nil {
-				AppLog.Error("mpx: %v", err)
+			if err := system.SetupMPX(deviceID); err != nil {
+				applog.AppLog.Error("mpx: %v", err)
 				return
 			}
 			o.eval("document.getElementById('btn-setup').textContent='Setup \u2713';")
@@ -272,7 +278,7 @@ func NewOverlayRenderer() *OverlayRenderer {
 
 	w.Bind("_teardownMPX", func() {
 		go func() {
-			teardownMPX()
+			system.TeardownMPX()
 			o.eval("document.getElementById('btn-setup').textContent='Setup';")
 		}()
 	})
@@ -288,7 +294,7 @@ func NewOverlayRenderer() *OverlayRenderer {
 			if o.provider != nil {
 				o.provider.SetContextDir(path)
 			}
-			CtxFileSelection.Clear()
+			appctx.CtxFileSelection.Clear()
 			o.SetFileSysLabel(path)
 		}()
 	})
@@ -298,7 +304,7 @@ func NewOverlayRenderer() *OverlayRenderer {
 	})
 
 	w.Bind("_toggleContextFile", func(path string, excluded bool) {
-		CtxFileSelection.SetExcluded(path, excluded)
+		appctx.CtxFileSelection.SetExcluded(path, excluded)
 	})
 
 	w.Bind("_removeTranscriptEntry", func(id int) {
@@ -319,14 +325,11 @@ func NewOverlayRenderer() *OverlayRenderer {
 		if o.provider != nil {
 			o.provider.SetContextDir(t.ContextDir)
 		}
-		CtxFileSelection.Clear()
+		appctx.CtxFileSelection.Clear()
 		o.SetFileSysLabel(t.ContextDir)
 	})
 
 	// Bind a JS-callable function that drains pending JS updates.
-	// The JS side polls this every 33ms via setInterval.
-	// Because Bind callbacks run on the GTK main thread, this avoids
-	// all cross-thread Dispatch calls that were causing SIGSEGV.
 	w.Bind("_pollUpdates", func() string {
 		C.fix_signal_handlers()
 		if o.needsRaise.CompareAndSwap(true, false) {
@@ -348,7 +351,7 @@ func NewOverlayRenderer() *OverlayRenderer {
 	})
 
 	w.Bind("_pollLog", func(after int) string {
-		entries := AppLog.Since(after)
+		entries := applog.AppLog.Since(after)
 		if len(entries) == 0 {
 			return ""
 		}
@@ -357,7 +360,7 @@ func NewOverlayRenderer() *OverlayRenderer {
 	})
 
 	w.Bind("_sendToSandbox", func(code, lang string) {
-		AppLog.Info("overlay: sendToSandbox lang=%s code=%d bytes", lang, len(code))
+		applog.AppLog.Info("overlay: sendToSandbox lang=%s code=%d bytes", lang, len(code))
 		o.sandboxMu.Lock()
 		o.sandboxCode = code
 		o.sandboxLang = lang
@@ -376,7 +379,7 @@ func NewOverlayRenderer() *OverlayRenderer {
 		o.eval(js)
 
 		go func() {
-			res := RunSandbox(code, lang)
+			res := sandbox.RunSandbox(code, lang)
 			o.renderSandboxResult(res)
 		}()
 	})
@@ -386,9 +389,9 @@ func NewOverlayRenderer() *OverlayRenderer {
 		if tests != "" {
 			combined = code + "\n" + tests
 		}
-		AppLog.Info("overlay: runSandbox lang=%s code=%d bytes", lang, len(combined))
+		applog.AppLog.Info("overlay: runSandbox lang=%s code=%d bytes", lang, len(combined))
 		if combined == "" {
-			AppLog.Warn("overlay: runSandbox called with empty code")
+			applog.AppLog.Warn("overlay: runSandbox called with empty code")
 			return
 		}
 		o.sandboxMu.Lock()
@@ -398,7 +401,7 @@ func NewOverlayRenderer() *OverlayRenderer {
 		o.eval("document.getElementById('sandbox-output').innerHTML='<span style=\"color:#888\">running...</span>';")
 
 		go func() {
-			res := RunSandbox(combined, lang)
+			res := sandbox.RunSandbox(combined, lang)
 			o.renderSandboxResult(res)
 		}()
 	})
@@ -439,7 +442,7 @@ func NewOverlayRenderer() *OverlayRenderer {
 			o.sandboxLang = lang
 			o.sandboxMu.Unlock()
 
-			res := RunSandbox(combined, lang)
+			res := sandbox.RunSandbox(combined, lang)
 			o.renderSandboxResult(res)
 		}()
 	})
@@ -459,14 +462,14 @@ func NewOverlayRenderer() *OverlayRenderer {
 		return buf.String()
 	})
 
-	w.Bind("_setClearOnProcess", func(on bool) { clearOnProcess.Store(on) })
+	w.Bind("_setClearOnProcess", func(on bool) { ClearOnProcess.Store(on) })
 
 	w.SetHtml(o.buildShell())
 	C.show_window(gtkWin)
 	return o
 }
 
-func (o *OverlayRenderer) SetActionHandler(fn func(HotkeyAction)) {
+func (o *OverlayRenderer) SetActionHandler(fn func(model.HotkeyAction)) {
 	o.onAction = fn
 }
 
@@ -486,9 +489,9 @@ func (o *OverlayRenderer) SetRemoveTracesHandler(fn func([]int)) {
 	o.onRemoveTraces = fn
 }
 
-func (o *OverlayRenderer) SetProvider(p Provider)          { o.provider = p }
-func (o *OverlayRenderer) SetAppState(s *AppState)         { o.appState = s }
-func (o *OverlayRenderer) SetAudioCapture(ac *AudioCapture) { o.ac = ac }
+func (o *OverlayRenderer) SetProvider(p model.Provider)            { o.provider = p }
+func (o *OverlayRenderer) SetAppState(s *model.AppState)           { o.appState = s }
+func (o *OverlayRenderer) SetAudioCapture(ac *audio.AudioCapture)  { o.ac = ac }
 
 func (o *OverlayRenderer) SetFileSysLabel(path string) {
 	label := filepath.Base(path)
@@ -522,7 +525,7 @@ func (o *OverlayRenderer) Run() {
 		if xid == 0 {
 			return
 		}
-		if err := setAlwaysOnTop(xid); err != nil {
+		if err := system.SetAlwaysOnTop(xid); err != nil {
 			fmt.Printf("warning: could not set always-on-top: %v\n", err)
 		}
 		g := o.fsGeom.Load()
@@ -580,9 +583,9 @@ func (o *OverlayRenderer) wrapResponse() string {
 	tid := o.currentTraceID
 	return fmt.Sprintf(
 		`<div class="trace-group" data-trace-id="%d">`+
-			`<div class="trace-header">`+
-			`<input type="checkbox" class="trace-cb" value="%d" onchange="_updateDeleteBtn()">`+
-			`<span class="trace-label">trace #%d</span></div>%s</div>`,
+			`<div class="row row-center trace-header">`+
+			`<input type="checkbox" class="row-ctrl trace-cb" value="%d" onchange="_updateDeleteBtn()">`+
+			`<span class="row-fill trace-label">trace #%d</span></div>%s</div>`,
 		tid, tid, tid, inner)
 }
 
@@ -618,8 +621,8 @@ func (o *OverlayRenderer) AppendTranscriptChunk(source, text string, id int) {
 	ts := time.Now().Format("15:04:05")
 	srcClass := "src-" + source
 	chunk := fmt.Sprintf(
-		`<div class="transcript-chunk" data-id="%d">`+
-			`<input type="checkbox" class="chunk-cb" onchange="_toggleChunk(%d,this.checked)">`+
+		`<div class="row transcript-chunk" data-id="%d">`+
+			`<input type="checkbox" class="row-ctrl chunk-cb" onchange="_toggleChunk(%d,this.checked)">`+
 			`<span class="ts">[%s</span> <span class="src %s">%s</span><span class="ts">]</span> %s</div>`,
 		id, id, escapeHTML(ts), srcClass, escapeHTML(source), escapeHTML(text))
 	counterKey := "_ctxAudio"
@@ -650,7 +653,7 @@ func (o *OverlayRenderer) setRecordingButton(elemID, label string, recording boo
 }
 
 func (o *OverlayRenderer) SetAudioRecording(recording bool) {
-	o.setRecordingButton("btn-audio", escapeHTML(keyLabels[HotkeyAudioCapture]), recording)
+	o.setRecordingButton("btn-audio", escapeHTML(model.KeyLabels[model.HotkeyAudioCapture]), recording)
 }
 
 func (o *OverlayRenderer) SetSoundCheck(active bool) {
@@ -663,7 +666,7 @@ func (o *OverlayRenderer) SetSoundCheck(active bool) {
 }
 
 func (o *OverlayRenderer) SetMicRecording(recording bool) {
-	o.setRecordingButton("btn-voice", escapeHTML(keyLabels[HotkeyFollowUp]), recording)
+	o.setRecordingButton("btn-voice", escapeHTML(model.KeyLabels[model.HotkeyFollowUp]), recording)
 }
 
 func (o *OverlayRenderer) UpdateVU(micLevel, audioLevel float64) {
@@ -709,7 +712,7 @@ func (o *OverlayRenderer) SetCurrentTraceID(id int) {
 	o.currentTraceID = id
 }
 
-func (o *OverlayRenderer) AddObserveTrace(trace Trace) {
+func (o *OverlayRenderer) AddObserveTrace(trace model.Trace) {
 	ts := trace.Time.Format("15:04:05")
 	var parts []string
 	if trace.ScreenCount > 0 {
@@ -744,15 +747,15 @@ func (o *OverlayRenderer) AddObserveTrace(trace Trace) {
 	restoreBtn := ""
 	if trace.HasContext && trace.ContextDir != "" {
 		restoreBtn = fmt.Sprintf(
-			` <button class="trace-restore" onclick="event.stopPropagation();_restoreArtifactContext(%d)" title="Restore file context">&#8635;</button>`,
+			` <button class="row-end trace-restore" onclick="event.stopPropagation();_restoreArtifactContext(%d)" title="Restore file context">&#8635;</button>`,
 			trace.ID)
 	}
 	html := fmt.Sprintf(
 		`<div class="observe-trace" data-trace-id="%d">`+
-			`<div class="observe-header" onclick="_toggleObserveTrace(%d)">`+
-			`<input type="checkbox" class="trace-cb" value="%d" onclick="event.stopPropagation();_updateDeleteBtn()">`+
-			`<span class="observe-chevron">&#9654;</span>`+
-			`<span>[%s] #%d — %s</span>%s</div>`+
+			`<div class="row row-center observe-header" onclick="_toggleObserveTrace(%d)">`+
+			`<input type="checkbox" class="row-ctrl trace-cb" value="%d" onclick="event.stopPropagation();_updateDeleteBtn()">`+
+			`<span class="row-ctrl observe-chevron">&#9654;</span>`+
+			`<span class="row-fill">[%s] #%d — %s</span>%s</div>`+
 			`<div class="observe-detail">%s</div></div>`,
 		trace.ID, trace.ID, trace.ID, escapeHTML(ts), trace.ID, escapeHTML(summary), restoreBtn, detail)
 	js := `var oc=document.getElementById('trace-content');` +
@@ -796,8 +799,8 @@ func (o *OverlayRenderer) Close() {
 	o.w.Terminate()
 }
 
-func (o *OverlayRenderer) renderSandboxResult(r SandboxResult) {
-	AppLog.Info("overlay: rendering sandbox result exit=%d", r.ExitCode)
+func (o *OverlayRenderer) renderSandboxResult(r model.SandboxResult) {
+	applog.AppLog.Info("overlay: rendering sandbox result exit=%d", r.ExitCode)
 	var parts []string
 	if r.Stdout != "" {
 		parts = append(parts, escapeHTML(r.Stdout))
@@ -849,15 +852,15 @@ func (o *OverlayRenderer) buildContextStateJSON() string {
 	var st ctxState
 
 	if o.appState != nil {
-		o.appState.mu.Lock()
-		for _, s := range o.appState.shots {
+		o.appState.Mu.Lock()
+		for _, s := range o.appState.Shots {
 			st.Screenshots = append(st.Screenshots, ctxScreenshot{
 				ID:       s.ID,
 				Time:     s.Time.Format("15:04:05"),
-				Selected: o.appState.selected[s.ID],
+				Selected: o.appState.Selected[s.ID],
 			})
 		}
-		o.appState.mu.Unlock()
+		o.appState.Mu.Unlock()
 	}
 
 	if o.ac != nil {
@@ -877,8 +880,8 @@ func (o *OverlayRenderer) buildContextStateJSON() string {
 	if o.provider != nil {
 		st.ContextDir = o.provider.ContextDir()
 	}
-	excluded := CtxFileSelection.ExcludedSet()
-	files := listContextFiles(st.ContextDir)
+	excluded := appctx.CtxFileSelection.ExcludedSet()
+	files := appctx.ListContextFiles(st.ContextDir)
 	for _, f := range files {
 		st.Files = append(st.Files, ctxFile{Path: f, Excluded: excluded[f]})
 	}
@@ -926,7 +929,7 @@ func (o *OverlayRenderer) buildHTML() string {
     <pre class="editor-highlight"><code id="sandbox-tests-hl"></code></pre>
     <textarea id="sandbox-tests" spellcheck="false" placeholder="Generated tests appear here..."></textarea>
   </div>
-  <div id="sandbox-controls">
+  <div id="sandbox-controls" class="row row-center">
     <button id="sandbox-run" onclick="_runCombined()">&#9654; Run</button>
     <button id="sandbox-test" onclick="_genTests(document.getElementById('sandbox-editor').value,document.getElementById('sandbox-lang').textContent)">&#9654; Test</button>
     <span id="sandbox-lang"></span>
@@ -941,7 +944,7 @@ func (o *OverlayRenderer) buildHTML() string {
   </div>
 </div>
 <div id="trace-content" class="tab-content"></div>
-<div id="log-content" class="tab-content"><pre id="log-output"></pre></div>
+<div id="log-content" class="tab-content"><div id="log-output"></div></div>
 <button id="delete-traces-btn" style="display:none" onclick="_deleteTraces()">Delete selected</button>
 <div id="ss-lightbox" onclick="this.classList.remove('active')"><img></div>
 </div>
@@ -998,24 +1001,24 @@ func vuColor(level float64) string {
 	return "'#50b050'"
 }
 
-var buttonIDs = map[HotkeyAction]string{
-	HotkeyFollowUp:     "btn-voice",
-	HotkeyAudioCapture: "btn-audio",
-	HotkeySoundCheck:   "btn-setup",
+var buttonIDs = map[model.HotkeyAction]string{
+	model.HotkeyFollowUp:     "btn-voice",
+	model.HotkeyAudioCapture: "btn-audio",
+	model.HotkeySoundCheck:   "btn-setup",
 }
 
 func buildFooterButtons() string {
 	var buf strings.Builder
-	for _, a := range keyOrder {
-		name := actionNames[a]
-		label := keyLabels[a]
+	for _, a := range model.KeyOrder {
+		name := model.ActionNames[a]
+		label := model.KeyLabels[a]
 		id := buttonIDs[a]
 		idAttr := ""
 		if id != "" {
 			idAttr = ` id="` + id + `"`
 		}
 		buf.WriteString(fmt.Sprintf(`<button%s onclick="_action('%s')">%s</button>`+"\n", idAttr, name, escapeHTML(label)))
-		if a == HotkeyFollowUp {
+		if a == model.HotkeyFollowUp {
 			buf.WriteString(`<button id="btn-context" onclick="_showCtxMenu(event)">file sys</button>` + "\n")
 		}
 	}

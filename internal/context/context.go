@@ -1,4 +1,4 @@
-package main
+package context
 
 import (
 	"fmt"
@@ -90,7 +90,7 @@ func readContextFile(path string, maxSize int64) (string, bool) {
 	return string(data), true
 }
 
-func listContextFiles(path string) []string {
+func ListContextFiles(path string) []string {
 	if path == "" {
 		return nil
 	}
@@ -122,7 +122,7 @@ func listContextFiles(path string) []string {
 	return files
 }
 
-func readContextPath(path string) string {
+func ReadContextPath(path string) string {
 	if path == "" {
 		return ""
 	}

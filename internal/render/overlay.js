@@ -166,12 +166,12 @@ window._refreshContext = function () {
     for (var i = 0; i < st.screenshots.length; i++) {
       var s = st.screenshots[i];
       sh +=
-        '<div class="ctx-item"><input type="checkbox" class="ctx-cb"' +
+        '<div class="row row-center ctx-item"><input type="checkbox" class="row-ctrl ctx-cb"' +
         (s.selected ? " checked" : "") +
         " onchange=\"_toggleScreenshot(" + s.id + ",this.checked);_updateCtxReceipt()\">" +
-        '<span style="color:' + (s.selected ? "#7ec8e3" : "#555") + '">[' +
+        '<span class="row-fill" style="color:' + (s.selected ? "#7ec8e3" : "#555") + '">[' +
         s.time + "] #" + s.id + "</span>" +
-        '<button class="ctx-rm" onclick="_removeScreenshot(' + s.id +
+        '<button class="row-end ctx-rm" onclick="_removeScreenshot(' + s.id +
         ');_refreshContext()">\u00d7</button></div>';
     }
     document.getElementById("ctx-screenshots").innerHTML = sh;
@@ -179,11 +179,11 @@ window._refreshContext = function () {
     var selChunks = document.querySelectorAll(".chunk-cb:checked");
     var totalChunks = document.querySelectorAll(".chunk-cb");
     if (!totalChunks.length) {
-      th += '<div style="color:#666">none</div>';
+      th += '<div class="row row-center" style="color:#666">none</div>';
     } else if (!selChunks.length) {
-      th += '<div style="color:#ccc">All (' + totalChunks.length + ' chunks)</div>';
+      th += '<div class="row row-center" style="color:#ccc">All (' + totalChunks.length + ' chunks)</div>';
     } else {
-      th += '<div style="color:#ccc">' + selChunks.length + ' selected</div>';
+      th += '<div class="row row-center" style="color:#ccc">' + selChunks.length + ' selected</div>';
     }
     document.getElementById("ctx-transcript").innerHTML = th;
     var fh = '<div class="ctx-section-title">Source Files</div>';
@@ -199,15 +199,15 @@ window._refreshContext = function () {
     for (var i = 0; i < st.files.length; i++) {
       var f = st.files[i];
       fh +=
-        '<div class="ctx-file-entry"><label><input type="checkbox" class="ctx-file-cb" ' +
+        '<div class="row row-center ctx-file-entry"><input type="checkbox" class="row-ctrl ctx-file-cb" ' +
         (f.excluded ? "" : "checked") +
         " onchange=\"_toggleContextFile('" +
         f.path.replace(/\x27/g, "\\'") +
-        "',!this.checked);_updateCtxReceipt()\"> <span" +
+        "',!this.checked);_updateCtxReceipt()\"><span class=\"row-fill\"" +
         (f.excluded ? ' style="color:#555"' : "") +
         ">" +
         f.path +
-        "</span></label></div>";
+        "</span></div>";
     }
     document.getElementById("ctx-files").innerHTML = fh;
     _updateCtxReceipt();
@@ -351,15 +351,10 @@ setInterval(function () {
       var ts = e.Time ? e.Time.substring(11, 19) : "";
       var cls = "log-" + e.Level;
       out.innerHTML +=
-        '<span class="' +
-        cls +
-        '">' +
-        ts +
-        " [" +
-        e.Level +
-        "] " +
-        e.Message +
-        "</span>\n";
+        '<div class="row row-center ' + cls + '">' +
+        '<span class="row-ctrl log-ts">' + ts + '</span>' +
+        '<span class="row-ctrl log-level">[' + e.Level + ']</span>' +
+        '<span class="row-fill">' + e.Message + '</span></div>';
       window._logIdx = e.Index;
     }
     if (isActive) {

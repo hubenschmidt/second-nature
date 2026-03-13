@@ -1,9 +1,9 @@
 {
   "configs": [
     {
-      "name": "dev-mode",
+      "name": "dev",
       "monitor": 0,
-      "overlay_monitor": 1,
+      "overlay_monitor": 2,
       "overlay_fullscreen": true,
       "provider": "3",
       "renderer": "3",

@@ -1,4 +1,4 @@
-package main
+package system
 
 import (
 	"fmt"
@@ -7,19 +7,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"second-nature/internal/model"
 )
 
-type MonitorInfo struct {
-	Index  int
-	Output string
-	Model  string
-	Geom   string
-	X, Y   int
-	Width  int
-	Height int
-}
-
-func listMonitors() ([]MonitorInfo, error) {
+func ListMonitors() ([]model.MonitorInfo, error) {
 	out, err := exec.Command("xrandr", "--listmonitors").Output()
 	if err != nil {
 		return nil, fmt.Errorf("xrandr failed: %w", err)
@@ -27,7 +19,7 @@ func listMonitors() ([]MonitorInfo, error) {
 
 	edidNames := readEDIDNames()
 
-	var monitors []MonitorInfo
+	var monitors []model.MonitorInfo
 	for _, line := range strings.Split(string(out), "\n") {
 		m := parseMonitorLine(line, len(monitors), edidNames)
 		if m != nil {
@@ -41,7 +33,7 @@ func listMonitors() ([]MonitorInfo, error) {
 	return monitors, nil
 }
 
-func parseMonitorLine(line string, idx int, edidNames map[string]string) *MonitorInfo {
+func parseMonitorLine(line string, idx int, edidNames map[string]string) *model.MonitorInfo {
 	line = strings.TrimSpace(line)
 	if line == "" || strings.HasPrefix(line, "Monitors:") {
 		return nil
@@ -52,13 +44,13 @@ func parseMonitorLine(line string, idx int, edidNames map[string]string) *Monito
 	}
 	output := parts[len(parts)-1]
 	geom := parts[2]
-	model := edidNames[output]
-	if model == "" {
-		model = "Unknown"
+	monitorModel := edidNames[output]
+	if monitorModel == "" {
+		monitorModel = "Unknown"
 	}
 	w, h, x, y := parseGeom(geom)
-	return &MonitorInfo{
-		Index: idx, Output: output, Model: model, Geom: geom,
+	return &model.MonitorInfo{
+		Index: idx, Output: output, Model: monitorModel, Geom: geom,
 		X: x, Y: y, Width: w, Height: h,
 	}
 }

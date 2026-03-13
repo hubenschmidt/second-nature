@@ -1,42 +1,30 @@
-package main
+package audio
 
 import (
 	"fmt"
-	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-)
 
-// SummarizeFn sends text to the LLM and returns a summary.
-// Stateless — does not append to conversation history.
-type SummarizeFn func(text string) (string, error)
+	"second-nature/internal/model"
+)
 
 const (
-	minChunkDuration    = 12 * time.Second
-	maxChunkDuration    = 25 * time.Second
-	micMinChunkDuration = 3 * time.Second
-	micMaxChunkDuration = 15 * time.Second
-	pollInterval        = 200 * time.Millisecond
-	vadTailSamples      = 32000 // 2s at 16kHz — silence window for chunk splitting
-	micVadTailSamples   = 4800  // 0.3s at 16kHz — short enough to catch single-word responses
-	micPollInterval     = 100 * time.Millisecond
-	dedupWindow        = 2 * time.Second
-	summarizeThreshold = 3000  // chars of raw text before triggering summarization
-	maxSummaryChars    = 16000 // ~4K tokens budget for summary history
-	maxRawChars        = 16000 // ~4K tokens budget for recent raw
-	maxSummarizeRetry  = 3
+	MinChunkDuration    = 12 * time.Second
+	MaxChunkDuration    = 25 * time.Second
+	MicMinChunkDuration = 3 * time.Second
+	MicMaxChunkDuration = 15 * time.Second
+	PollInterval        = 200 * time.Millisecond
+	VadTailSamples      = 32000 // 2s at 16kHz — silence window for chunk splitting
+	MicVadTailSamples   = 4800  // 0.3s at 16kHz — short enough to catch single-word responses
+	MicPollInterval     = 100 * time.Millisecond
+	dedupWindow         = 2 * time.Second
+	summarizeThreshold  = 3000  // chars of raw text before triggering summarization
+	maxSummaryChars     = 16000 // ~4K tokens budget for summary history
+	maxRawChars         = 16000 // ~4K tokens budget for recent raw
+	maxSummarizeRetry   = 3
 )
-
-// TranscriptEntry is a UI-stable transcript chunk with a unique ID.
-// Separate from rawChunks (which feed the summarization pipeline and get drained).
-type TranscriptEntry struct {
-	ID     int
-	Text   string
-	Source string
-	Time   time.Time
-}
 
 type micStamp struct {
 	text string
@@ -46,11 +34,11 @@ type micStamp struct {
 // AudioCapture records audio continuously, transcribes in chunks,
 // and accumulates transcript text for later use by the LLM.
 type AudioCapture struct {
-	mode       CaptureMode
+	mode       model.CaptureMode
 	monSource  string
 	whisperURL string
-	renderer   Renderer
-	summarize  SummarizeFn
+	renderer   model.Renderer
+	summarize  model.SummarizeFn
 	recorder   *Recorder
 	active     atomic.Bool
 	stopCh     chan struct{}
@@ -61,13 +49,13 @@ type AudioCapture struct {
 	summaries    []string
 	summarizing  atomic.Bool
 	retryCount   int
-	entries      []TranscriptEntry
+	entries      []model.TranscriptEntry
 	selected     map[int]bool
 	nextID       int
 	micRecent    []micStamp
 }
 
-func NewAudioCapture(mode CaptureMode, monSource string, whisperURL string, renderer Renderer, summarize SummarizeFn) *AudioCapture {
+func NewAudioCapture(mode model.CaptureMode, monSource string, whisperURL string, renderer model.Renderer, summarize model.SummarizeFn) *AudioCapture {
 	return &AudioCapture{
 		mode:       mode,
 		monSource:  monSource,
@@ -90,7 +78,7 @@ func (ac *AudioCapture) Toggle() {
 }
 
 func (ac *AudioCapture) StartSoundCheck() {
-	ac.recorder = NewRecorder(CaptureModeSystem, ac.monSource)
+	ac.recorder = NewRecorder(model.CaptureModeSystem, ac.monSource)
 	if err := ac.recorder.Start(); err != nil {
 		ac.renderer.SetStatus("audio capture error: " + err.Error())
 		return
@@ -218,13 +206,13 @@ func (ac *AudioCapture) TranscribeNow() {
 	if len(samples) == 0 {
 		return
 	}
-	if !hasVoice(samples) {
+	if !HasVoice(samples) {
 		fmt.Printf("[audio-capture] dropped chunk: %d samples (VAD: no speech)\n", len(samples))
 		return
 	}
 	fmt.Printf("[audio-capture] sending chunk: %d samples\n", len(samples))
 
-	wavData := EncodeWAV(samples, asrSampleRate)
+	wavData := EncodeWAV(samples, AsrSampleRate)
 	text, err := Transcribe(wavData, ac.whisperURL)
 	if err != nil {
 		fmt.Printf("[audio-capture] transcribe error: %v\n", err)
@@ -245,7 +233,7 @@ func (ac *AudioCapture) TranscribeNow() {
 	ac.rawCharCount += len(trimmed)
 	id := ac.nextID
 	ac.nextID++
-	ac.entries = append(ac.entries, TranscriptEntry{ID: id, Text: trimmed, Source: "audio", Time: time.Now()})
+	ac.entries = append(ac.entries, model.TranscriptEntry{ID: id, Text: trimmed, Source: "audio", Time: time.Now()})
 	n := ac.rawCharCount
 	for _, s := range ac.summaries {
 		n += len(s)
@@ -326,7 +314,7 @@ func (ac *AudioCapture) AddEntry(source, text string) int {
 	defer ac.mu.Unlock()
 	id := ac.nextID
 	ac.nextID++
-	ac.entries = append(ac.entries, TranscriptEntry{ID: id, Text: text, Source: source, Time: time.Now()})
+	ac.entries = append(ac.entries, model.TranscriptEntry{ID: id, Text: text, Source: source, Time: time.Now()})
 	return id
 }
 
@@ -374,10 +362,10 @@ func (ac *AudioCapture) BuildSelectedContext() string {
 }
 
 // Entries returns a copy of all transcript entries.
-func (ac *AudioCapture) Entries() []TranscriptEntry {
+func (ac *AudioCapture) Entries() []model.TranscriptEntry {
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
-	cp := make([]TranscriptEntry, len(ac.entries))
+	cp := make([]model.TranscriptEntry, len(ac.entries))
 	copy(cp, ac.entries)
 	return cp
 }
@@ -463,12 +451,12 @@ func (ac *AudioCapture) isMicDuplicate(text string) bool {
 // RunChunkLoop polls for silence-based chunk boundaries while active.
 // Must be called in a goroutine.
 func (ac *AudioCapture) RunChunkLoop() {
-	runChunkLoop(minChunkDuration, maxChunkDuration, vadTailSamples, pollInterval, ac.recorder, ac.stopCh, ac.TranscribeNow)
+	RunChunkLoop(MinChunkDuration, MaxChunkDuration, VadTailSamples, PollInterval, ac.recorder, ac.stopCh, ac.TranscribeNow)
 }
 
-// runChunkLoop is a generic chunk-boundary poller parameterized by timing,
+// RunChunkLoop is a generic chunk-boundary poller parameterized by timing,
 // recorder, stop channel, and a transcribe callback.
-func runChunkLoop(minDur, maxDur time.Duration, tailSamples int, poll time.Duration, recorder *Recorder, stopCh <-chan struct{}, transcribe func()) {
+func RunChunkLoop(minDur, maxDur time.Duration, tailSamples int, poll time.Duration, recorder *Recorder, stopCh <-chan struct{}, transcribe func()) {
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 
@@ -500,16 +488,3 @@ func (ac *AudioCapture) PeekTailRMS(n int) float64 {
 	}
 	return ac.recorder.PeekTailRMS(n) / 32768.0
 }
-
-func rms(samples []int16) float64 {
-	if len(samples) == 0 {
-		return 0
-	}
-	var sum float64
-	for _, s := range samples {
-		v := float64(s)
-		sum += v * v
-	}
-	return math.Sqrt(sum / float64(len(samples)))
-}
-

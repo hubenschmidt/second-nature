@@ -1,4 +1,4 @@
-package main
+package audio
 
 import (
 	"encoding/binary"
@@ -8,11 +8,11 @@ import (
 
 const vadFrameMs = 20 // 20ms frames at 16kHz = 320 samples
 
-var vadFrameSize = asrSampleRate * vadFrameMs / 1000 // 320
+var vadFrameSize = AsrSampleRate * vadFrameMs / 1000 // 320
 
-// hasVoice returns true if any 20ms frame in samples contains speech
+// HasVoice returns true if any 20ms frame in samples contains speech
 // according to WebRTC VAD (mode 3 — most aggressive filtering).
-func hasVoice(samples []int16) bool {
+func HasVoice(samples []int16) bool {
 	if len(samples) < vadFrameSize {
 		return false
 	}
@@ -27,7 +27,7 @@ func hasVoice(samples []int16) bool {
 
 	for off := 0; off+vadFrameSize <= len(samples); off += vadFrameSize {
 		frame := samplesToBytes(samples[off : off+vadFrameSize])
-		active, err := vad.Process(asrSampleRate, frame)
+		active, err := vad.Process(AsrSampleRate, frame)
 		if err != nil {
 			return true
 		}
@@ -38,13 +38,13 @@ func hasVoice(samples []int16) bool {
 	return false
 }
 
-// tailHasVoice checks only the last n samples for voice activity.
-func tailHasVoice(samples []int16, n int) bool {
+// TailHasVoice checks only the last n samples for voice activity.
+func TailHasVoice(samples []int16, n int) bool {
 	start := len(samples) - n
 	if start < 0 {
 		start = 0
 	}
-	return hasVoice(samples[start:])
+	return HasVoice(samples[start:])
 }
 
 // samplesToBytes converts int16 PCM to little-endian bytes for WebRTC VAD.

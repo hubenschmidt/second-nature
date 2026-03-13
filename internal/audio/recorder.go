@@ -1,35 +1,26 @@
-package main
+package audio
 
 import (
-	"bytes"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
-	"net/http"
+	"math"
 	"os/exec"
-	"strings"
 	"sync"
+
+	"second-nature/internal/applog"
+	"second-nature/internal/model"
 )
 
 const (
-	asrSampleRate   = 16000
-	asrChannels     = 1
-	asrFramesPerBuf = 1024
-)
-
-type CaptureMode int
-
-const (
-	CaptureModeMic CaptureMode = iota
-	CaptureModeSystem
-	CaptureModeBoth
+	AsrSampleRate   = 16000
+	AsrChannels     = 1
+	AsrFramesPerBuf = 1024
 )
 
 // Recorder captures audio from mic and/or system via parec (PulseAudio).
 type Recorder struct {
-	mode      CaptureMode
+	mode      model.CaptureMode
 	monSource string // PulseAudio source name for monitor
 	micCmd    *exec.Cmd
 	monCmd    *exec.Cmd
@@ -38,7 +29,7 @@ type Recorder struct {
 	stopCh    chan struct{}
 }
 
-func NewRecorder(mode CaptureMode, monSource string) *Recorder {
+func NewRecorder(mode model.CaptureMode, monSource string) *Recorder {
 	return &Recorder{mode: mode, monSource: monSource}
 }
 
@@ -64,7 +55,7 @@ func (r *Recorder) Start() error {
 
 // startMicCapture spawns parec to capture mic audio via the default PulseAudio source.
 func (r *Recorder) startMicCapture() error {
-	if r.mode == CaptureModeSystem {
+	if r.mode == model.CaptureModeSystem {
 		return nil
 	}
 
@@ -90,7 +81,7 @@ func (r *Recorder) startMicCapture() error {
 
 // startMonitorCapture spawns parec to capture system audio as s16le mono 16kHz.
 func (r *Recorder) startMonitorCapture() error {
-	if r.mode == CaptureModeMic {
+	if r.mode == model.CaptureModeMic {
 		return nil
 	}
 
@@ -116,7 +107,7 @@ func (r *Recorder) startMonitorCapture() error {
 
 // readLoopParec reads s16le PCM from parec stdout and appends to samples.
 func (r *Recorder) readLoopParec(stdout io.ReadCloser) {
-	buf := make([]byte, asrFramesPerBuf*2) // 2 bytes per int16 sample
+	buf := make([]byte, AsrFramesPerBuf*2) // 2 bytes per int16 sample
 	for {
 		select {
 		case <-r.stopCh:
@@ -125,7 +116,7 @@ func (r *Recorder) readLoopParec(stdout io.ReadCloser) {
 		}
 		n, err := stdout.Read(buf)
 		if err != nil && err != io.EOF {
-			AppLog.Error("parec read: %v", err)
+			applog.AppLog.Error("parec read: %v", err)
 		}
 		if err != nil {
 			return
@@ -159,16 +150,16 @@ func (r *Recorder) PeekTailRMS(n int) float64 {
 	defer r.mu.Unlock()
 
 	if len(r.samples) < n {
-		return rms(r.samples)
+		return Rms(r.samples)
 	}
-	return rms(r.samples[len(r.samples)-n:])
+	return Rms(r.samples[len(r.samples)-n:])
 }
 
 // TailHasVoice returns true if VAD detects speech in the last n samples.
 func (r *Recorder) TailHasVoice(n int) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return tailHasVoice(r.samples, n)
+	return TailHasVoice(r.samples, n)
 }
 
 // SampleCount returns the current number of buffered samples.
@@ -229,45 +220,19 @@ func bytesToInt16(b []byte) []int16 {
 	return out
 }
 
-type whisperResponse struct {
-	Text string `json:"text"`
+func Rms(samples []int16) float64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	var sum float64
+	for _, s := range samples {
+		v := float64(s)
+		sum += v * v
+	}
+	return math.Sqrt(sum / float64(len(samples)))
 }
 
+// Transcribe sends WAV data to whisper and returns text.
 func Transcribe(wavData []byte, whisperURL string) (string, error) {
-	var body bytes.Buffer
-	w := multipart.NewWriter(&body)
-
-	part, err := w.CreateFormFile("file", "audio.wav")
-	if err != nil {
-		return "", fmt.Errorf("create form file: %w", err)
-	}
-	if _, err := part.Write(wavData); err != nil {
-		return "", fmt.Errorf("write wav: %w", err)
-	}
-
-	w.WriteField("response_format", "json")
-	w.WriteField("temperature", "0.0")
-	w.Close()
-
-	resp, err := http.Post(whisperURL+"/inference", w.FormDataContentType(), &body)
-	if err != nil {
-		return "", fmt.Errorf("whisper request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("whisper %d: %s", resp.StatusCode, string(b))
-	}
-
-	var result whisperResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("decode response: %w", err)
-	}
-
-	text := strings.TrimSpace(result.Text)
-	if text == "" {
-		return "", fmt.Errorf("no speech detected")
-	}
-	return text, nil
+	return transcribe(wavData, whisperURL)
 }

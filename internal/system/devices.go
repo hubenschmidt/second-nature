@@ -1,4 +1,4 @@
-package main
+package system
 
 import (
 	"bufio"
@@ -6,30 +6,27 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"second-nature/internal/model"
 )
 
-type PulseSource struct {
-	ID   string
-	Name string
-}
-
-func ListMonitorSources() ([]PulseSource, error) {
+func ListMonitorSources() ([]model.PulseSource, error) {
 	out, err := exec.Command("pactl", "list", "short", "sources").Output()
 	if err != nil {
 		return nil, fmt.Errorf("pactl: %w", err)
 	}
 
-	var monitors []PulseSource
+	var monitors []model.PulseSource
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) >= 2 && strings.HasSuffix(fields[1], ".monitor") {
-			monitors = append(monitors, PulseSource{ID: fields[0], Name: fields[1]})
+			monitors = append(monitors, model.PulseSource{ID: fields[0], Name: fields[1]})
 		}
 	}
 	return monitors, nil
 }
 
-func SelectAudioMode(scanner *bufio.Scanner) (CaptureMode, string, error) {
+func SelectAudioMode(scanner *bufio.Scanner) (model.CaptureMode, string, error) {
 	fmt.Println("\nAudio capture mode:")
 	fmt.Println("  1: Mic only")
 	fmt.Println("  2: System audio (monitor source)")
@@ -39,16 +36,16 @@ func SelectAudioMode(scanner *bufio.Scanner) (CaptureMode, string, error) {
 
 	input := strings.TrimSpace(scanner.Text())
 	if input == "" || input == "1" {
-		return CaptureModeMic, "", nil
+		return model.CaptureModeMic, "", nil
 	}
 
 	if input != "2" && input != "3" {
 		return 0, "", fmt.Errorf("invalid audio mode: %s", input)
 	}
 
-	mode := CaptureModeSystem
+	mode := model.CaptureModeSystem
 	if input == "3" {
-		mode = CaptureModeBoth
+		mode = model.CaptureModeBoth
 	}
 
 	source, err := selectMonitorDevice(scanner)

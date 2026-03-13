@@ -1,4 +1,4 @@
-package main
+package sandbox
 
 import (
 	"context"
@@ -8,14 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-)
 
-type SandboxResult struct {
-	Stdout   string
-	Stderr   string
-	ExitCode int
-	Error    string
-}
+	"second-nature/internal/applog"
+	"second-nature/internal/model"
+)
 
 type runner struct {
 	ext        string
@@ -24,8 +20,8 @@ type runner struct {
 }
 
 var runners = map[string]runner{
-	"python": {ext: ".py", runCmd: func(src string) []string { return []string{"python3", src} }},
-	"go":     {ext: ".go", runCmd: func(src string) []string { return []string{"go", "run", src} }},
+	"python":     {ext: ".py", runCmd: func(src string) []string { return []string{"python3", src} }},
+	"go":         {ext: ".go", runCmd: func(src string) []string { return []string{"go", "run", src} }},
 	"javascript": {ext: ".js", runCmd: func(src string) []string { return []string{"node", src} }},
 	"js":         {ext: ".js", runCmd: func(src string) []string { return []string{"node", src} }},
 	"typescript": {ext: ".ts", runCmd: func(src string) []string { return []string{"npx", "tsx", src} }},
@@ -54,26 +50,26 @@ var runners = map[string]runner{
 	},
 }
 
-func RunSandbox(code, lang string) (result SandboxResult) {
+func RunSandbox(code, lang string) (result model.SandboxResult) {
 	defer func() {
 		if rv := recover(); rv != nil {
-			AppLog.Error("sandbox: panic: %v", rv)
-			result = SandboxResult{Error: fmt.Sprintf("panic: %v", rv), ExitCode: 1}
+			applog.AppLog.Error("sandbox: panic: %v", rv)
+			result = model.SandboxResult{Error: fmt.Sprintf("panic: %v", rv), ExitCode: 1}
 		}
 	}()
 
-	AppLog.Info("sandbox: lang=%s code=%d bytes", lang, len(code))
+	applog.AppLog.Info("sandbox: lang=%s code=%d bytes", lang, len(code))
 
 	r, ok := runners[strings.ToLower(lang)]
 	if !ok {
-		AppLog.Error("sandbox: unsupported language: %s", lang)
-		return SandboxResult{Error: fmt.Sprintf("unsupported language: %s", lang), ExitCode: 1}
+		applog.AppLog.Error("sandbox: unsupported language: %s", lang)
+		return model.SandboxResult{Error: fmt.Sprintf("unsupported language: %s", lang), ExitCode: 1}
 	}
 
 	tmpdir, err := os.MkdirTemp("", "sandbox-*")
 	if err != nil {
-		AppLog.Error("sandbox: tmpdir: %v", err)
-		return SandboxResult{Error: fmt.Sprintf("tmpdir: %v", err), ExitCode: 1}
+		applog.AppLog.Error("sandbox: tmpdir: %v", err)
+		return model.SandboxResult{Error: fmt.Sprintf("tmpdir: %v", err), ExitCode: 1}
 	}
 	defer os.RemoveAll(tmpdir)
 
@@ -83,18 +79,18 @@ func RunSandbox(code, lang string) (result SandboxResult) {
 	}
 	src := filepath.Join(tmpdir, filename)
 	if err := os.WriteFile(src, []byte(code), 0600); err != nil {
-		AppLog.Error("sandbox: write: %v", err)
-		return SandboxResult{Error: fmt.Sprintf("write: %v", err), ExitCode: 1}
+		applog.AppLog.Error("sandbox: write: %v", err)
+		return model.SandboxResult{Error: fmt.Sprintf("write: %v", err), ExitCode: 1}
 	}
 
 	bin := filepath.Join(tmpdir, "main")
 
 	if r.compileCmd != nil {
 		args := r.compileCmd(src, bin)
-		AppLog.Info("sandbox: compile %v", args)
+		applog.AppLog.Info("sandbox: compile %v", args)
 		res := runWithTimeout(args, tmpdir)
 		if res.ExitCode != 0 {
-			AppLog.Warn("sandbox: compile failed exit=%d stderr=%s", res.ExitCode, res.Stderr)
+			applog.AppLog.Warn("sandbox: compile failed exit=%d stderr=%s", res.ExitCode, res.Stderr)
 			return res
 		}
 	}
@@ -104,18 +100,18 @@ func RunSandbox(code, lang string) (result SandboxResult) {
 		runTarget = bin
 	}
 	args := r.runCmd(runTarget)
-	AppLog.Info("sandbox: run %v", args)
+	applog.AppLog.Info("sandbox: run %v", args)
 	res := runWithTimeout(args, tmpdir)
-	AppLog.Info("sandbox: exit=%d stdout=%d stderr=%d", res.ExitCode, len(res.Stdout), len(res.Stderr))
+	applog.AppLog.Info("sandbox: exit=%d stdout=%d stderr=%d", res.ExitCode, len(res.Stdout), len(res.Stderr))
 	if res.Error != "" {
-		AppLog.Error("sandbox: %s", res.Error)
+		applog.AppLog.Error("sandbox: %s", res.Error)
 	}
 	return res
 }
 
 const sandboxTimeout = 10 * time.Second
 
-func runWithTimeout(args []string, dir string) SandboxResult {
+func runWithTimeout(args []string, dir string) model.SandboxResult {
 	ctx, cancel := context.WithTimeout(context.Background(), sandboxTimeout)
 	defer cancel()
 
@@ -129,7 +125,7 @@ func runWithTimeout(args []string, dir string) SandboxResult {
 	err := cmd.Run()
 
 	if ctx.Err() == context.DeadlineExceeded {
-		return SandboxResult{
+		return model.SandboxResult{
 			Stdout:   stdout.String(),
 			Stderr:   stderr.String(),
 			ExitCode: 124,
@@ -138,7 +134,7 @@ func runWithTimeout(args []string, dir string) SandboxResult {
 	}
 
 	if exitErr, ok := err.(*exec.ExitError); ok {
-		return SandboxResult{
+		return model.SandboxResult{
 			Stdout:   stdout.String(),
 			Stderr:   stderr.String(),
 			ExitCode: exitErr.ExitCode(),
@@ -146,7 +142,7 @@ func runWithTimeout(args []string, dir string) SandboxResult {
 	}
 
 	if err != nil {
-		return SandboxResult{
+		return model.SandboxResult{
 			Stdout:   stdout.String(),
 			Stderr:   stderr.String(),
 			ExitCode: 1,
@@ -154,7 +150,7 @@ func runWithTimeout(args []string, dir string) SandboxResult {
 		}
 	}
 
-	return SandboxResult{
+	return model.SandboxResult{
 		Stdout:   stdout.String(),
 		Stderr:   stderr.String(),
 		ExitCode: 0,

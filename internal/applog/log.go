@@ -1,23 +1,18 @@
-package main
+package applog
 
 import (
 	"fmt"
 	"sync"
 	"time"
+
+	"second-nature/internal/model"
 )
 
 const logCapacity = 200
 
-type LogEntry struct {
-	Time    time.Time
-	Level   string
-	Message string
-	Index   int
-}
-
 type appLogger struct {
 	mu      sync.Mutex
-	entries []LogEntry
+	entries []model.LogEntry
 	nextIdx int
 }
 
@@ -28,7 +23,7 @@ func (l *appLogger) Log(level, format string, args ...interface{}) {
 	fmt.Printf("[%s] %s\n", level, msg)
 
 	l.mu.Lock()
-	entry := LogEntry{
+	entry := model.LogEntry{
 		Time:    time.Now(),
 		Level:   level,
 		Message: msg,
@@ -54,11 +49,11 @@ func (l *appLogger) Error(format string, args ...interface{}) {
 	l.Log("error", format, args...)
 }
 
-func (l *appLogger) Since(after int) []LogEntry {
+func (l *appLogger) Since(after int) []model.LogEntry {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	var result []LogEntry
+	var result []model.LogEntry
 	for _, e := range l.entries {
 		if e.Index > after {
 			result = append(result, e)
